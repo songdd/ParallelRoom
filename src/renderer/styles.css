@@ -1,0 +1,2326 @@
+* {
+  box-sizing: border-box;
+}
+
+:root {
+  --bg: #0d0e12;
+  --bar: #14161c;
+  --tile: #16181f;
+  --line: #262a34;
+  --text: #e7e9ee;
+  --dim: #8b90a0;
+  --accent: #fe2c55;
+  --ok: #22c55e;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.4 "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+  user-select: none;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+}
+
+#bar {
+  flex: 0 0 auto;
+  height: 46px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 10px;
+  background: var(--bar);
+  border-bottom: 1px solid var(--line);
+}
+
+.brand {
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+}
+
+.brand span {
+  color: var(--accent);
+}
+
+#add-form {
+  display: flex;
+  gap: 6px;
+  min-width: 260px;
+  flex: 0 1 460px;
+}
+
+#add-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 30px;
+  padding: 0 10px;
+  color: var(--text);
+  background: #0f1116;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  outline: none;
+  font: inherit;
+  user-select: text;
+}
+
+#add-input:focus {
+  border-color: #3b4252;
+}
+
+#add-input::placeholder {
+  color: #5b6070;
+}
+
+#add-input.bad {
+  border-color: #7a2233;
+  animation: shake 0.4s ease-in-out;
+}
+
+@keyframes shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  25% {
+    transform: translateX(-4px);
+  }
+  75% {
+    transform: translateX(4px);
+  }
+}
+
+button {
+  height: 30px;
+  padding: 0 12px;
+  color: var(--text);
+  background: #232734;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+button:hover {
+  background: #2c313f;
+}
+
+button:active {
+  transform: translateY(1px);
+}
+
+button.ghost {
+  background: transparent;
+}
+
+button.ghost:hover {
+  background: #232734;
+}
+
+button.ghost.on {
+  color: #0d0e12;
+  background: #e0b463;
+  border-color: #e0b463;
+}
+
+button.ghost.on:hover {
+  background: #edc377;
+}
+
+button.danger:hover {
+  border-color: #6b2231;
+  color: #ff8ea0;
+}
+
+#add-btn {
+  background: var(--accent);
+  border-color: transparent;
+  color: #fff;
+  font-weight: 600;
+}
+
+#add-btn:hover {
+  background: #ff4368;
+}
+
+.tools {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  /* 控件变多以后必须能自己换行：否则 .tools 作为 flex 项会按内容宽度撑开，
+     窗口一窄，右边那些按钮（录制参数 / 留分段 / 停止录制 …）就被挤出可视区 */
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.quality-wrap {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 30px;
+  padding: 0 6px 0 8px;
+  color: var(--dim);
+  background: #0f1116;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font-size: 12px;
+}
+
+#quality-select {
+  height: 22px;
+  padding: 0 4px;
+  color: var(--text);
+  background: #1b1f29;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  font: inherit;
+  outline: none;
+}
+
+.spacer {
+  flex: 1 1 auto;
+}
+
+#count {
+  color: var(--dim);
+  white-space: nowrap;
+}
+
+#status {
+  max-width: 42vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--dim);
+}
+
+#status.rec-on {
+  color: #ff6b81;
+  font-weight: 600;
+}
+
+#status.ok {
+  color: #7ddc9b;
+}
+
+#status.err {
+  color: #ffb27a;
+}
+
+#status.warn {
+  color: #ffc078;
+}
+
+.tile.recording {
+  border-color: #c8304a;
+  box-shadow: 0 0 0 1px rgba(255, 76, 106, 0.5) inset;
+}
+
+/* ---------------- 聚焦布局：中间大窗口 + 右侧小窗口 ---------------- */
+
+#grid.spotlight .tile.is-main {
+  outline: 2px solid rgba(255, 92, 140, 0.6);
+  outline-offset: -2px;
+}
+
+/* 把某块小窗拖到大窗口上面时，大窗口高亮提示"松手就换到中间" */
+#grid.spotlight .tile.is-main.drop-target {
+  outline: 3px solid #ff5c8c;
+  outline-offset: -3px;
+  box-shadow: 0 0 0 1px rgba(255, 92, 140, 0.45) inset, 0 0 24px rgba(255, 92, 140, 0.35);
+}
+
+#grid.spotlight .tile.is-main.drop-target .main-tag::after {
+  content: ' · 松手换到这里';
+}
+
+/* 小窗口之间拖动排序时，被拖那块抬起来 */
+#grid.spotlight .tile.is-small.dragging {
+  z-index: 32;
+}
+
+/*
+ * 房间名压在画面上、常驻显示 —— 小窗口缩小以后顶栏那 26px 挤满按钮，
+ * 名字会被挤没，所以小窗的名字走画面上的浮层。
+ * 大窗口顶栏本来就宽、主播名清清楚楚，画面上不再压一层（全屏时顶栏隐藏，才显示）。
+ */
+#grid.spotlight .tile .tile-name {
+  display: block;
+  top: 8px;
+  left: 8px;
+  z-index: 4;
+  max-width: calc(100% - 16px);
+  padding: 3px 11px;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.35;
+  letter-spacing: 0.2px;
+  color: #fff;
+  background: rgba(6, 7, 11, 0.66);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.95);
+}
+
+/* 全屏悬停时顶栏是浮层，名字让位（否则叠在一起） */
+body.fs #grid.spotlight .tile:hover .tile-name {
+  display: none;
+}
+
+/* 大窗口：顶栏已经写着主播名，浮层去掉 */
+#grid.spotlight .tile.is-main .tile-name {
+  display: none;
+}
+
+/* 大窗口的顶栏标题放大一点（空间够） */
+#grid.spotlight .tile.is-main .tile-head .title {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: #f1f4fa;
+}
+
+/* 全屏下顶栏是隐藏的（要悬停才出来），所以大窗口还是显示名字 */
+body.fs #grid.spotlight .tile.is-main .tile-name {
+  display: block;
+  top: 12px;
+  left: 12px;
+  max-width: calc(100% - 130px);
+  padding: 5px 16px;
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: 0.4px;
+  background: rgba(6, 7, 11, 0.7);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+/* 小窗口顶栏只留按钮（名字已经在画面上了，顶栏那点宽度给它还是显示不全） */
+#grid.spotlight .tile.is-small .tile-head {
+  gap: 2px;
+  padding: 0 2px 0 6px;
+}
+
+/*
+ * 标题不能 display:none —— 它是那个 flex:1 的弹性占位，去掉以后按钮会全部挤到左边。
+ * 这里用 visibility:hidden 保留占位，文字不显示，按钮照样贴右边。
+ */
+#grid.spotlight .tile.is-small .tile-head .title {
+  display: block;
+  visibility: hidden;
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+/* 小窗口里把按钮压紧一点，最窄的列宽也放得下（音量条保留，只是短一点） */
+#grid.spotlight .tile.is-small .tile-head .act {
+  width: 20px;
+  font-size: 11px;
+}
+
+#grid.spotlight .tile.is-small .tile-head .act.rec {
+  width: auto;
+  min-width: 46px;
+  padding: 0 5px;
+}
+
+#grid.spotlight .tile.is-small .tile-head .act.vol {
+  flex: 0 0 40px;
+  width: 40px;
+}
+
+/* 小窗口上盖一层透明点击层：点一下就把这块换到中间
+   z-index 只能是 5：顶栏在全屏下是绝对定位浮层（z-index 8），这一层不能压住它，
+   否则全屏里点小窗的「关闭 / 录制 / 静音」全被这一层吃掉。 */
+.stage .swap-hit {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  cursor: pointer;
+  background: transparent;
+  transition: background 120ms ease;
+}
+.stage .swap-hit:hover {
+  background: rgba(0, 0, 0, 0.24);
+  box-shadow: 0 0 0 2px rgba(255, 92, 140, 0.75) inset;
+}
+
+.stage .swap-hit::after {
+  content: '换到中间';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  background: rgba(8, 9, 13, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  pointer-events: none;
+}
+
+.stage .swap-hit:hover::after {
+  opacity: 1;
+}
+
+/* 中间大窗口的角标 */
+.stage .main-tag {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 6;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #ffe1e8;
+  background: rgba(200, 48, 74, 0.78);
+  border-radius: 999px;
+  pointer-events: none;
+}
+
+/*
+ * 主画面 / 右侧小窗 之间的拖拽分隔条。
+ * 跟主画面放在同一列、靠右对齐，所以正好压在分界线上；
+ * position: sticky + 内联高度（可视高度）保证右侧滚动时它也跟着钉住。
+ */
+.rail-grip {
+  grid-column: 1;
+  grid-row: 1 / -1;
+  justify-self: end;
+  align-self: start;
+  position: sticky;
+  top: 0;
+  z-index: 9;
+  width: 11px;
+  margin-right: -4px;
+  cursor: col-resize;
+  border-radius: 4px;
+}
+
+.rail-grip::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 4px;
+  width: 3px;
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 2px;
+  transition: background 120ms ease, box-shadow 120ms ease;
+}
+
+.rail-grip:hover::before,
+body.rail-resizing .rail-grip::before {
+  background: #ff5c8c;
+  box-shadow: 0 0 8px rgba(255, 92, 140, 0.8);
+}
+
+/* 拖动时盖一层全屏盾牌：指针划到视频区上方也不会掉事件 */
+#rail-shield {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  cursor: col-resize;
+  background: transparent;
+}
+
+body.rail-resizing {
+  user-select: none;
+}
+
+.tile-head .act.rec.on {
+  color: #ff4c6a;
+}
+
+.tile-head .act.rec.on::after {
+  content: '';
+}
+
+/* ------------------------------ tabs / 视图 ------------------------------ */
+
+#tabs {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  background: #0f1116;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.tab {
+  height: 24px;
+  padding: 0 12px;
+  color: var(--dim);
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.tab:hover {
+  color: var(--text);
+}
+
+.tab.active {
+  color: #fff;
+  background: #2a3040;
+}
+
+.view {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.row {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* 监控页的工具栏控件变多了（搜索 + 排序 + 间隔 + 三个按钮），窗口窄时允许换行，别把按钮挤没 */
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  background: var(--bar);
+  border-bottom: 1px solid var(--line);
+}
+
+.row .spacer {
+  flex: 1 1 auto;
+}
+
+#mon-sel-info {
+  color: var(--dim);
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+#mon-sel-info.warn {
+  color: #ffc078;
+}
+
+#mon-search {
+  width: 180px;
+  height: 28px;
+  padding: 0 10px;
+  color: var(--text);
+  background: #0f1116;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+#mon-search:focus {
+  border-color: #3b4252;
+}
+
+#mon-search::placeholder {
+  color: #5b6070;
+}
+
+#mon-search::-webkit-search-cancel-button {
+  filter: invert(0.6);
+  cursor: pointer;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: transparent;
+  color: #fff;
+  font-weight: 600;
+}
+
+button.primary:hover {
+  background: #ff4368;
+}
+
+/* ------------------------------ 监控卡片 ------------------------------ */
+
+#mon-stats {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 12px;
+  font-size: 12px;
+  color: var(--dim);
+  background: #101218;
+  border-top: 1px solid var(--line);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#mon-stats.warn {
+  color: #ffc078;
+}
+
+#cards {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  /* 关键：卡片的高度来自 aspect-ratio，它不算"内容"，auto 行会被压扁到几像素，
+     卡片就溢出自己的格子压到下一行去（实测压了 137–164px）。max-content 让行按卡片实际高度走。 */
+  grid-auto-rows: max-content;
+  align-content: start;
+}
+
+#cards-empty {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 48px 24px;
+  color: var(--dim);
+  text-align: center;
+}
+
+#cards-empty h2 {
+  margin: 0;
+  font-size: 16px;
+  color: var(--text);
+  font-weight: 600;
+}
+
+#cards-empty p {
+  margin: 2px 0;
+  max-width: 620px;
+}
+
+#cards-empty .hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #6b7182;
+}
+
+.card {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  overflow: hidden;
+  background: #14161d;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.card.status-live {
+  border-color: #2f6b46;
+  box-shadow: 0 0 0 1px rgba(34, 197, 94, 0.25) inset;
+}
+
+.card-cover {
+  position: absolute;
+  inset: 0;
+  background-size: cover;
+  background-position: center;
+  filter: saturate(0.9);
+}
+
+.card-cover.placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #1b2030, #101320);
+}
+
+.card-cover.placeholder span {
+  font-size: 44px;
+  font-weight: 700;
+  color: #39405a;
+}
+
+.card:not(.status-live) .card-cover {
+  filter: grayscale(0.7) brightness(0.6);
+}
+
+/* 卡片顶栏：勾选 · ★ · 打开/移除（hover 才显形） · 状态角标，一行排开
+   放在顶部而不是浮在封面中央，既不会压住主播的人脸，也不会压住底部的名字/检测时间 */
+.card-top {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  right: 8px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.card-check {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  background: rgba(8, 9, 13, 0.65);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.card-check input {
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+.status-dot {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  font-size: 11px;
+  border-radius: 20px;
+  color: #cfd3de;
+  background: rgba(8, 9, 13, 0.7);
+  white-space: nowrap;
+}
+
+.card.status-live .status-dot {
+  color: #06220f;
+  background: var(--ok);
+  font-weight: 600;
+}
+
+/* 状态可能过期：角标从鲜绿变灰绿 + 虚线描边，提示"这条判定不一定还准" */
+.card.expired.status-live .status-dot {
+  color: #16211b;
+  background: #6f8f7d;
+  outline: 1px dashed rgba(255, 255, 255, 0.35);
+  outline-offset: -2px;
+}
+
+.card.expired {
+  border-style: dashed;
+}
+
+.card.just-live {
+  border-color: #ff4c6a;
+  box-shadow: 0 0 0 1px rgba(255, 76, 106, 0.45) inset;
+}
+
+/* 状态可能过期（超过 20 分钟没探过）：边框改虚线，别让人误信 */
+
+/* 正在探测这张卡：橙色呼吸边框 + 顶部扫光条 */
+.card.probing {
+  border-color: #e0b463;
+  animation: probingPulse 1.2s ease-in-out infinite;
+}
+
+.card.probing::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 3px;
+  width: 40%;
+  z-index: 5;
+  background: linear-gradient(90deg, transparent, #e0b463, transparent);
+  animation: probingBar 1.2s linear infinite;
+}
+
+@keyframes probingPulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 2px rgba(224, 180, 99, 0.2) inset;
+  }
+  50% {
+    box-shadow: 0 0 0 3px rgba(224, 180, 99, 0.55) inset;
+  }
+}
+
+@keyframes probingBar {
+  from {
+    left: -40%;
+  }
+  to {
+    left: 100%;
+  }
+}
+
+#mon-sel-info.busy {
+  color: #e0b463;
+  font-weight: 600;
+}
+
+/* 正在观看的房间：蓝紫边框 + 「▶ 观看中」角标 */
+.card.watching {
+  border-color: #4c8dff;
+  box-shadow: 0 0 0 1px rgba(76, 141, 255, 0.45) inset;
+}
+
+.watch-chip {
+  position: absolute;
+  top: 36px;
+  right: 8px;
+  z-index: 2;
+  padding: 2px 7px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  background: #2f6bd8;
+  border-radius: 20px;
+  white-space: nowrap;
+}
+
+/* 看得到封面上的名字，别被角标压住 */
+
+.card.just-live .status-dot {
+  color: #fff;
+  background: #ff4c6a;
+  animation: justLivePulse 1.6s ease-in-out infinite;
+}
+
+@keyframes justLivePulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(255, 76, 106, 0.6);
+  }
+  50% {
+    box-shadow: 0 0 0 5px rgba(255, 76, 106, 0);
+  }
+}
+
+.card.status-error .status-dot {
+  color: #ffd7a1;
+  background: rgba(90, 60, 20, 0.85);
+}
+
+.card-body {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2;
+  padding: 22px 10px 10px;
+  background: linear-gradient(to top, rgba(6, 7, 11, 0.92), rgba(6, 7, 11, 0));
+}
+
+.card-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: #f0f2f7;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card-meta {
+  margin-top: 2px;
+  font-size: 11px;
+  color: #9aa1b3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card-actions {
+  /* 顶栏里靠右排：打开 / 移除 紧挨着状态角标左边 */
+  margin-left: auto;
+  flex: 0 0 auto;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.card:hover .card-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.card .mini {
+  height: 22px;
+  padding: 0 8px;
+  font-size: 11px;
+  border-radius: 5px;
+  background: rgba(24, 28, 38, 0.92);
+  border: 1px solid var(--line);
+  color: var(--text);
+}
+
+.card .mini:hover {
+  background: #2c313f;
+}
+
+.card .mini.del:hover {
+  color: #ff8ea0;
+  border-color: #6b2231;
+}
+
+.card .mini.star {
+  color: #7d8496;
+}
+
+.card .mini.star.on {
+  color: #0d0e12;
+  background: #e0b463;
+  border-color: #e0b463;
+}
+
+/* 特别关注星标：常驻显示（它是状态，不该只在 hover 时出现） */
+.star-btn {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  line-height: 1;
+  color: #cfd3de;
+  background: rgba(8, 9, 13, 0.65);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.star-btn:hover {
+  background: rgba(28, 32, 44, 0.95);
+  border-color: #3b4252;
+}
+
+.star-btn.on {
+  color: #0d0e12;
+  background: #e0b463;
+  border-color: #e0b463;
+}
+
+.star-btn.on:hover {
+  background: #edc377;
+}
+
+.card.special {
+  border-color: #6b5a2a;
+}
+
+#grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  gap: 6px;
+  padding: 6px;
+  grid-template-columns: 1fr;
+  grid-template-rows: 1fr;
+  align-content: start;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* 瓦片多了要能往下滚，滚动条做得细一点 */
+#grid::-webkit-scrollbar {
+  width: 8px;
+}
+
+#grid::-webkit-scrollbar-thumb {
+  background: #2c313f;
+  border-radius: 4px;
+}
+
+#grid::-webkit-scrollbar-thumb:hover {
+  background: #3a4150;
+}
+
+#empty {
+  grid-column: 1 / -1;
+  grid-row: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  color: var(--dim);
+  text-align: center;
+  padding: 0 24px;
+}
+
+#empty h2 {
+  margin: 0;
+  font-size: 18px;
+  color: var(--text);
+  font-weight: 600;
+}
+
+#empty p {
+  margin: 2px 0;
+  max-width: 620px;
+}
+
+#empty code {
+  color: #c8ccd8;
+  background: #1b1e26;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+#empty .hint {
+  margin-top: 10px;
+  font-size: 12px;
+  color: #6b7182;
+  max-width: 560px;
+}
+
+.hidden {
+  display: none !important;
+}
+
+/* ------------------------------ 全屏 ------------------------------ */
+
+#fs-hint {
+  display: none;
+  position: fixed;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 60;
+  padding: 4px 12px;
+  font-size: 12px;
+  color: #dfe3ec;
+  background: rgba(8, 9, 13, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 20px;
+  pointer-events: none;
+  transition: opacity 0.25s ease;
+}
+
+body.fs #fs-hint {
+  display: block;
+  opacity: 0.55;
+}
+
+body.fs #fs-hint.gone {
+  opacity: 0;
+}
+
+/* 全屏 / 手动收起时，把顶部所有工具行藏掉：
+   #bar（品牌 + 监控/观看 tab）以及视图里的 .row（直播号输入、登录、全静音、画质、录制目录…） */
+body.fs #bar,
+body.fs .view > .row,
+body.bar-hidden #bar,
+body.bar-hidden .view > .row {
+  display: none;
+}
+
+/* 唤出时这两条一起以浮层形式出现在顶部 */
+body.fs.peek #bar,
+body.bar-hidden.peek #bar {
+  display: flex;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 56;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+  animation: barDrop 0.16s ease-out;
+}
+
+body.fs.peek .view > .row,
+body.bar-hidden.peek .view > .row {
+  display: flex;
+  position: fixed;
+  top: 46px;
+  left: 0;
+  right: 0;
+  z-index: 55;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+  animation: barDrop 0.16s ease-out;
+}
+
+/* 收起状态下，顶部右侧留一个小 ▾ 作为入口 */
+#bar-handle {
+  display: none;
+  position: fixed;
+  top: 0;
+  right: 14px;
+  z-index: 70;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 16px;
+  font-size: 11px;
+  line-height: 1;
+  color: #9aa1b3;
+  background: rgba(20, 22, 28, 0.92);
+  border: 1px solid var(--line);
+  border-top: none;
+  border-radius: 0 0 8px 8px;
+  cursor: pointer;
+  opacity: 0.45;
+  transition: opacity 0.15s ease;
+}
+
+#bar-handle:hover {
+  opacity: 1;
+  color: #fff;
+  background: #1b1f29;
+}
+
+body.bar-hidden #bar-handle,
+body.fs #bar-handle {
+  display: flex;
+}
+
+/* 浮出时不显示入口 */
+body.peek #bar-handle {
+  display: none;
+}
+
+.bar-collapse {
+  width: 26px;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1;
+  color: #9aa1b3;
+}
+
+.bar-collapse:hover {
+  color: #fff;
+}
+
+/* 鼠标在顶部边缘停留一会儿才浮出工具栏（浮层，不挤压画面） */
+@keyframes barDrop {
+  from {
+    transform: translateY(-100%);
+  }
+  to {
+    transform: none;
+  }
+}
+
+/* 顶部感应区：一条 8px 高的不可见热区，鼠标停上去才唤出工具栏 */
+#top-hotspot {
+  display: none;
+}
+
+body.fs #top-hotspot {
+  display: block;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 8px;
+  z-index: 54;
+}
+
+/* 每个瓦片的标题栏（录制/静音/关闭按钮）也一并收掉，鼠标移到该瓦片上才浮出 */
+body.fs .tile-head {
+  display: none;
+}
+
+body.fs .tile:hover .tile-head {
+  display: flex;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  /* 要比瓦片画面上的浮层高，否则全屏里点不到「关闭」（浮层 z-index 是 5） */
+  z-index: 8;
+  background: rgba(8, 9, 13, 0.88);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* ------------------------------- 磁贴 ------------------------------- */
+
+.tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--tile);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+}
+
+.tile.focused {
+  border-color: #3f4557;
+}
+
+.tile.other {
+  border-color: #5c431f;
+}
+
+.tile-head .badge {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  font-size: 10px;
+  color: #ffd7a1;
+  background: #3a2a14;
+  border: 1px solid #5c431f;
+  border-radius: 4px;
+  white-space: nowrap;
+  cursor: help;
+}
+
+.tile.flash {
+  animation: tileFlash 0.9s ease-out;
+}
+
+/* 重复添加时闪一下已有的那张卡片 */
+.card.flash {
+  animation: cardFlash 1.4s ease-out;
+}
+
+@keyframes cardFlash {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(224, 180, 99, 0);
+  }
+  25% {
+    box-shadow: 0 0 0 3px rgba(224, 180, 99, 0.9);
+  }
+  60% {
+    box-shadow: 0 0 0 3px rgba(224, 180, 99, 0.45);
+  }
+}
+
+@keyframes tileFlash {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(254, 44, 85, 0);
+  }
+  30% {
+    box-shadow: 0 0 0 3px rgba(254, 44, 85, 0.85);
+  }
+}
+
+.tile-head {
+  flex: 0 0 auto;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px 0 8px;
+  background: #11131a;
+  border-bottom: 1px solid var(--line);
+  cursor: grab;
+  touch-action: none;
+}
+
+/* 拖动中：抬起来（阴影 + 置顶），位移用 transform 跟着指针走，不触发重排 */
+.tile.dragging {
+  position: relative;
+  z-index: 30;
+  opacity: 0.94;
+  border-color: #6f7ea6;
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(122, 152, 224, 0.35);
+  will-change: transform;
+}
+
+/* 拖动中：整页盖一层透明盾牌，指针划过视频区也不会掉事件 */
+#drag-shield {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  cursor: grabbing;
+  background: transparent;
+}
+
+body.tile-dragging {
+  user-select: none;
+}
+
+.tile-head .idx {
+  flex: 0 0 auto;
+  min-width: 16px;
+  padding: 0 4px;
+  height: 16px;
+  line-height: 16px;
+  text-align: center;
+  font-size: 11px;
+  color: #cfd3de;
+  background: #262b38;
+  border-radius: 4px;
+}
+
+.tile-head .title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #dfe3ec;
+}
+
+.tile-head .act {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 20px;
+  padding: 0;
+  line-height: 1;
+  font-size: 12px;
+  color: #9aa0b0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+}
+
+.tile-head .act:hover {
+  color: var(--text);
+  background: #262b38;
+}
+
+.tile-head .act.off {
+  color: #6b7182;
+}
+
+.tile-head .act.unmuted {
+  color: var(--ok);
+}
+
+.tile-head .act.close:hover {
+  color: #ff8ea0;
+  background: #3a1e26;
+}
+
+.stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  background: #000;
+}
+
+.stage webview {
+  display: flex;
+  width: 100%;
+  height: 100%;
+}
+
+.overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  text-align: center;
+  color: #b9bfd0;
+  background: #0b0c11;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.overlay.error {
+  color: #ff9aa8;
+}
+
+.overlay .spin {
+  color: var(--dim);
+}
+
+/* 全屏时隐藏标题栏，但仍要能看出这是谁：左上角常驻主播名 */
+.tile-name {
+  display: none;
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 4;
+  max-width: calc(100% - 120px);
+  padding: 4px 12px;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  color: #ffffff;
+  background: rgba(6, 7, 11, 0.68);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.95);
+  pointer-events: none;
+}
+
+body.fs .tile-name {
+  display: block;
+}
+
+/* 全屏下鼠标移到瓦片上时，名字让位给标题栏 */
+body.fs .tile:hover .tile-name {
+  display: none;
+}
+
+/* 自渲染弹幕面板：不依赖抖音侧栏是否展开 */
+.danmu-panel {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  max-width: 46%;
+  max-height: 46%;
+  overflow: hidden;
+  padding: 6px 8px;
+  font-size: var(--dm-font, 11px);
+  line-height: 1.5;
+  color: #eef1f6;
+  background: rgba(8, 9, 13, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 7px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+  pointer-events: none;
+  backdrop-filter: blur(2px);
+}
+
+/* 弹幕面板贴哪个角：body 上挂 dm-pos-* 类 */
+body.dm-pos-br .danmu-panel {
+  left: auto;
+  right: 8px;
+}
+
+body.dm-pos-tl .danmu-panel {
+  bottom: auto;
+  top: 8px;
+}
+
+body.dm-pos-tr .danmu-panel {
+  left: auto;
+  right: 8px;
+  bottom: auto;
+  top: 8px;
+}
+
+/* ------------------------------ 录制面板（弹窗） ------------------------------ */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(4, 5, 9, 0.66);
+  backdrop-filter: blur(3px);
+}
+
+.modal.hidden {
+  display: none;
+}
+
+.modal-box {
+  width: min(920px, 92vw);
+  max-height: 86vh;
+  overflow: auto;
+  padding: 16px 18px 18px;
+  background: #161922;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.6);
+}
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.modal-head h2 {
+  margin: 0;
+  font-size: 15px;
+  color: var(--text);
+  flex: 1 1 auto;
+}
+
+.modal-sec {
+  padding: 10px 0 4px;
+  border-top: 1px solid var(--line);
+}
+
+.modal-sec h3 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--dim);
+  letter-spacing: 0.02em;
+}
+
+.modal-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.modal-row input[type='text'] {
+  flex: 1 1 220px;
+  min-width: 0;
+  height: 28px;
+  padding: 0 10px;
+  color: var(--text);
+  background: #0f1116;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font: inherit;
+}
+
+.modal-check {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 8px;
+  font-size: 12px;
+  color: var(--dim);
+  cursor: pointer;
+}
+
+.modal-check input {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* 录制选项里的数字参数（最长时长 / 磁盘余量） */
+.num-input {
+  width: 78px;
+  height: 28px;
+  padding: 0 8px;
+  color: var(--text);
+  background: #0f1116;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font: inherit;
+  font-size: 12px;
+  text-align: right;
+}
+
+.num-input:focus {
+  outline: none;
+  border-color: #3f4557;
+}
+
+.modal-hint {
+  margin: 8px 0 0;
+  font-size: 11px;
+  color: #6b7182;
+  line-height: 1.6;
+}
+
+.rec-files {
+  max-height: 34vh;
+  overflow: auto;
+  margin-bottom: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0f1116;
+}
+
+.rec-file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  cursor: pointer;
+}
+
+.rec-file:last-child {
+  border-bottom: 0;
+}
+
+.rec-file:hover {
+  background: #191d27;
+}
+
+.rec-file input {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.rec-file .rf-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rec-file .rf-meta {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.rec-files-empty {
+  padding: 14px 12px;
+  font-size: 12px;
+  color: var(--dim);
+}
+
+/* ------------------------------ 剪辑页签 ------------------------------ */
+
+.edit-dir-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.edit-dir-label {
+  font-size: 12px;
+  color: var(--dim);
+  white-space: nowrap;
+}
+
+#edit-dir {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 28px;
+  padding: 0 10px;
+  color: var(--dim);
+  background: #0f1116;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font: inherit;
+  font-size: 12px;
+}
+
+#edit-sel-info {
+  color: var(--dim);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.edit-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  gap: 10px;
+  padding: 10px;
+}
+
+.edit-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bar);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px;
+}
+
+.edit-files-pane {
+  flex: 1 1 58%;
+  min-width: 0;
+}
+
+.edit-wm-pane {
+  flex: 1 1 42%;
+  min-width: 0;
+  overflow: auto;
+}
+
+.edit-pane-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.edit-pane-head h3 {
+  margin: 0;
+  flex: 1 1 auto;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--dim);
+}
+
+.edit-files {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0f1116;
+}
+
+.edit-group {
+  padding: 4px 10px;
+  font-size: 11px;
+  color: #7d8496;
+  background: #14161d;
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+}
+
+.edit-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  cursor: pointer;
+}
+
+.edit-row:hover {
+  background: #191d27;
+}
+
+.edit-row input {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.edit-row .er-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.edit-row .er-meta {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.edit-row.pending .er-name {
+  color: #e0b463;
+}
+
+.edit-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.edit-actions input {
+  flex: 1 1 200px;
+  min-width: 0;
+  height: 28px;
+  padding: 0 10px;
+  color: var(--text);
+  background: #0f1116;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font: inherit;
+}
+
+.wm-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 10px;
+}
+
+.wm-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--dim);
+  min-width: 0;
+}
+
+.wm-field > span:first-child {
+  flex: 0 0 52px;
+  text-align: right;
+}
+
+.wm-wide {
+  grid-column: 1 / -1;
+}
+
+.wm-field input[type='text'],
+.wm-field input[type='number'],
+.wm-field select {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  color: var(--text);
+  background: #0f1116;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 12px;
+}
+
+.wm-field input[type='color'] {
+  width: 40px;
+  height: 26px;
+  padding: 0;
+  background: #0f1116;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.wm-image-row,
+.wm-range {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.wm-range input {
+  width: 64px;
+}
+
+.modal-hint-inline {
+  margin: 0;
+  font-size: 11px;
+  color: #6b7182;
+}
+
+.modal-hint code {
+  padding: 1px 5px;
+  font-size: 11px;
+  color: #cfd3de;
+  background: #0f1116;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  word-break: break-all;
+}
+
+/* 录制按钮：开始/结束是两个明确状态，分段按钮只在录制中出现 */
+.tile-head .act.rec {
+  width: auto;
+  min-width: 52px;
+  padding: 0 7px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #9aa0b0;
+}
+
+.tile-head .act.rec:not(.on):hover {
+  color: #ff8ea0;
+  background: #2a1b21;
+}
+
+.tile-head .act.rec-split {
+  width: auto;
+  min-width: 52px;
+  padding: 0 7px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #e0b463;
+  background: #241f16;
+  border-color: #4a3d22;
+}
+
+.tile-head .act.rec-split:hover {
+  color: #ffd08a;
+  background: #2f2718;
+}
+
+.tile-head .act.rec-split:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* 工具栏上的小勾选框（留分段） */
+.bar-check {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 8px;
+  font-size: 12px;
+  color: var(--dim);
+  background: #0f1116;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.bar-check:hover {
+  color: var(--text);
+  border-color: #3b4252;
+}
+
+.bar-check input {
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.bar-check.on {
+  color: #e0b463;
+  border-color: #4a3d22;
+  background: #241f16;
+}
+
+/* 剪辑列表：分组头 + 成片/分段标签 */
+.edit-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.edit-group .eg-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.edit-group-btn {
+  flex: 0 0 auto;
+  height: 20px;
+  padding: 0 8px;
+  font-size: 11px;
+  color: #9aa0b0;
+  background: #1b202b;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.edit-group-btn:hover {
+  color: var(--text);
+  background: #262b38;
+}
+
+.er-tag {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  height: 16px;
+  line-height: 16px;
+  font-size: 10px;
+  color: #06220f;
+  background: var(--ok);
+  border-radius: 4px;
+}
+
+.er-tag.part {
+  color: #b9c0d0;
+  background: #2a3040;
+}
+
+/* 剪辑页：刷新状态 + 新增文件高亮 */
+.edit-refresh-at {
+  font-size: 11px;
+  color: #6b7182;
+  white-space: nowrap;
+}
+
+.edit-refresh-at.err {
+  color: #ff8ea0;
+}
+
+.edit-row.just-added {
+  animation: editRowIn 1.6s ease-out;
+}
+
+@keyframes editRowIn {
+  0% {
+    background: rgba(76, 141, 255, 0.28);
+  }
+  100% {
+    background: transparent;
+  }
+}
+
+/* ------------------------------ 整窗录制提示边框 ------------------------------ */
+
+#win-rec-frame {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  pointer-events: none;
+  border: 4px solid #ff3b5c;
+  box-shadow: inset 0 0 26px rgba(255, 59, 92, 0.35);
+  border-radius: 2px;
+  animation: winRecPulse 1.6s ease-in-out infinite;
+}
+
+#win-rec-frame.hidden {
+  display: none;
+}
+
+#win-rec-label {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 3px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  background: #ff3b5c;
+  border-radius: 20px;
+  box-shadow: 0 2px 10px rgba(255, 59, 92, 0.5);
+  white-space: nowrap;
+}
+
+@keyframes winRecPulse {
+  0%,
+  100% {
+    border-color: #ff3b5c;
+    box-shadow: inset 0 0 26px rgba(255, 59, 92, 0.35);
+  }
+  50% {
+    border-color: #ff8ea0;
+    box-shadow: inset 0 0 40px rgba(255, 59, 92, 0.55);
+  }
+}
+
+/* 全屏时同样 4px：录制只裁各瓦片的视频区（离窗口边缘约 6px），边框不能压进去 */
+body.fs #win-rec-frame {
+  border-width: 4px;
+}
+
+/* 提示胶囊：默认在顶部；如果顶部会落进录制区域（全屏、工具栏收起时瓦片贴到顶），
+   就自动挪到底部；底部也不安全就整个隐藏——只留边框（边框贴窗口边缘，录制裁的是瓦片区域，录不进去） */
+#win-rec-label.pos-top {
+  top: 8px;
+  bottom: auto;
+}
+
+#win-rec-label.pos-bottom {
+  top: auto;
+  bottom: 8px;
+}
+
+#win-rec-label.hidden {
+  display: none;
+}
+
+/* 每个房间独立音量（在瓦片标题栏里，位于 .stage 之外，不会被录进画面） */
+.tile-head .act.vol {
+  flex: 0 0 auto;
+  width: 56px;
+  height: 18px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  opacity: 0.35;
+  cursor: pointer;
+  accent-color: #7aa2ff;
+  transition: opacity 0.12s ease;
+}
+
+.tile:hover .tile-head .act.vol,
+.tile-head .act.vol:focus {
+  opacity: 1;
+}
+
+.tile-head .act.vol::-webkit-slider-runnable-track {
+  height: 3px;
+  background: #3a4150;
+  border-radius: 2px;
+}
+
+.tile-head .act.vol::-webkit-slider-thumb {
+  width: 10px;
+  height: 10px;
+  margin-top: -3.5px;
+  border-radius: 50%;
+  background: #7aa2ff;
+  border: none;
+  cursor: pointer;
+}
+
+/* 剪辑列表里"合并后的第几段"标号 */
+.er-order {
+  flex: 0 0 auto;
+  min-width: 22px;
+  padding: 0 4px;
+  height: 16px;
+  line-height: 16px;
+  font-size: 10px;
+  font-weight: 700;
+  text-align: center;
+  color: #0b1220;
+  background: #7aa2ff;
+  border-radius: 4px;
+}
+
+/* ------------------------------- 调试页 ------------------------------- */
+
+#view-debug {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.row-title {
+  font-size: 12px;
+  color: #cfd4e2;
+  font-weight: 600;
+}
+
+.hint {
+  font-size: 11px;
+  color: #7d8496;
+}
+
+.dbg-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 12px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.dbg-sec h3 {
+  margin: 0 0 4px;
+  font-size: 12px;
+  color: #cfd4e2;
+  font-weight: 600;
+}
+
+.dbg-note {
+  margin: 0 0 6px;
+  font-size: 11px;
+  color: #6b7182;
+  line-height: 1.6;
+}
+
+.dbg-empty {
+  margin: 0;
+  font-size: 11px;
+  color: #6b7182;
+}
+
+.dbg-table {
+  overflow: auto;
+}
+
+table.dbg {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  font-family: ui-monospace, Consolas, 'Courier New', monospace;
+  color: #aab0c0;
+}
+
+table.dbg th,
+table.dbg td {
+  padding: 3px 8px;
+  text-align: left;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  white-space: nowrap;
+  max-width: 520px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+table.dbg th {
+  position: sticky;
+  top: 0;
+  background: #14161d;
+  color: #8f96a8;
+  font-weight: 600;
+}
+
+table.dbg tr.warn td {
+  background: rgba(224, 180, 99, 0.1);
+}
+
+table.dbg tr.ok td {
+  background: rgba(90, 200, 140, 0.09);
+}
+
+table.dbg b.bad {
+  color: #ffb4b4;
+}
+
+/* 调试页里的小按钮（释放） */
+.dbg-btn {
+  height: 20px;
+  padding: 0 8px;
+  font-size: 11px;
+  line-height: 1;
+  color: #ffb4b4;
+  background: #2a1c22;
+  border: 1px solid #5a2d38;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.dbg-btn:hover {
+  color: #ffd0d0;
+  background: #3a2029;
+}
+
+.dbg-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.dbg-dim {
+  color: #6b7182;
+}
+
+/* 监控（探测）占用的资源：在调试页里单独高亮，别跟观看瓦片混在一起看 */
+table.dbg tr.dbg-mon td {
+  background: rgba(122, 162, 255, 0.07);
+}
+
+.dbg-type {
+  color: #cfd4e2;
+}
+
+.dbg-chip {
+  margin-left: 6px;
+  padding: 0 6px;
+  font-size: 10px;
+  line-height: 15px;
+  border-radius: 999px;
+  color: #9aa0b0;
+  background: #232734;
+  border: 1px solid #2c3341;
+  white-space: nowrap;
+}
+
+.dbg-chip.mon {
+  color: #cfe0ff;
+  background: #1d2a44;
+  border-color: #3a5178;
+}
+
+.dbg-chip.dim {
+  color: #78808f;
+  background: transparent;
+}
+
+/* ------------------------ 通用小菜单（画质 / 弹幕设置） ------------------------ */
+
+.pop-menu {
+  position: fixed;
+  z-index: 9000;
+  min-width: 150px;
+  max-height: 72vh;
+  overflow-y: auto;
+  padding: 4px;
+  background: #151822;
+  border: 1px solid #2b3140;
+  border-radius: 9px;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.6);
+  font-size: 12.5px;
+}
+
+.pop-title {
+  padding: 5px 9px 6px;
+  color: #8f97a8;
+  font-size: 11.5px;
+  border-bottom: 1px solid #232936;
+  margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 260px;
+}
+
+.pop-head {
+  padding: 6px 9px 2px;
+  font-size: 11px;
+  color: #6f7789;
+}
+
+.pop-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 5px 9px 5px 22px;
+  position: relative;
+  color: #dfe3ec;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12.5px;
+}
+
+.pop-item:hover {
+  background: #222838;
+  color: #fff;
+}
+
+.pop-item.checked {
+  color: #ffd0db;
+}
+
+.pop-item.checked::before {
+  content: '\2713';
+  position: absolute;
+  left: 7px;
+  color: #ff5c8c;
+}
+
+.pop-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: #232936;
+}
+
+/* ------------------------ 快捷键帮助 ------------------------ */
+
+.help-box {
+  max-width: 740px;
+}
+
+.help-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.help-table td {
+  padding: 4px 6px;
+  border-bottom: 1px solid #1e222c;
+  vertical-align: top;
+  color: #c8cdd8;
+}
+
+.help-table td:first-child {
+  width: 215px;
+  color: #e8ebf2;
+  white-space: nowrap;
+}
+
+kbd {
+  display: inline-block;
+  padding: 1px 5px;
+  font-family: inherit;
+  font-size: 11.5px;
+  color: #e8ebf2;
+  background: #232936;
+  border: 1px solid #333b4d;
+  border-bottom-width: 2px;
+  border-radius: 5px;
+}

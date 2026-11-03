@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:"
+    />
+    <title>ParallelRoom</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header id="bar">
+      <div class="brand">Parallel<span>Room</span></div>
+      <div id="tabs">
+        <button class="tab" type="button" data-tab="monitor">监控</button>
+        <button class="tab active" type="button" data-tab="watch">观看</button>
+        <button class="tab" type="button" data-tab="edit">剪辑</button>
+        <button class="tab" type="button" data-tab="debug" title="调试：看每个房间占用了哪些页面/进程/音源，关闭后有没有真的释放">调试</button>
+      </div>
+      <div class="spacer"></div>
+      <div id="status"></div>
+      <div id="count">0 个房间</div>
+      <button id="btn-hide-bar" class="ghost bar-collapse" type="button" title="隐藏顶部工具栏（鼠标点顶部小箭头可再展开）">▴</button>
+    </header>
+
+    <div id="bar-handle" title="显示工具栏">▾</div>
+
+    <!-- ------------------------------ 观看 ------------------------------ -->
+    <main id="view-watch" class="view">
+      <div class="row">
+        <form id="add-form" autocomplete="off">
+          <input id="add-input" type="text" placeholder="直播间号，或 https://live.douyin.com/123456" spellcheck="false" />
+          <button id="add-btn" type="submit" class="primary">添加</button>
+        </form>
+
+        <div class="tools">
+          <label class="quality-wrap" title="每屏显示几个瓦片。超出的部分用滚动条往下看。">
+            <span>布局</span>
+            <select id="grid-select">
+              <option value="auto" selected>自动</option>
+              <option value="focus">中间大 · 右侧小窗</option>
+              <option value="1x1">1 × 1</option>
+              <option value="2x1">2 × 1</option>
+              <option value="2x2">2 × 2（4 个）</option>
+              <option value="3x1">3 × 1</option>
+              <option value="3x2">3 × 2（6 个）</option>
+              <option value="3x3">3 × 3（9 个）</option>
+              <option value="4x3">4 × 3（12 个）</option>
+            </select>
+          </label>
+          <label class="quality-wrap" title="切换清晰度（对所有房间生效）。默认只给 960x540，切原画后是 1920x1080。">
+            <span>画质</span>
+            <select id="quality-select">
+              <option value="原画" selected>原画</option>
+              <option value="蓝光">蓝光</option>
+              <option value="超清">超清</option>
+              <option value="高清">高清</option>
+              <option value="标清">标清</option>
+              <option value="">不干预</option>
+            </select>
+          </label>
+          <button id="btn-login" class="ghost" type="button" title="打开抖音登录窗口，扫码一次即可对全部房间生效">登录抖音</button>
+          <button id="btn-login-huya" class="ghost" type="button" title="打开虎牙登录窗口（www.huya.com 扫码）；登录后虎牙房间可能解锁更高画质">登录虎牙</button>
+          <button id="btn-mute-all" class="ghost" type="button" title="所有房间静音">全静音</button>
+          <button id="btn-unmute-all" class="ghost" type="button" title="所有房间都出声">全出声</button>
+          <button id="btn-reload-all" class="ghost" type="button" title="重新加载全部房间">重载</button>
+          <button id="btn-pure" class="ghost on" type="button" title="只留视频：藏掉抖音自己的侧栏、飘屏弹幕、礼物栏、页头。">
+            只看画面：开
+          </button>
+          <button id="btn-danmu" class="ghost" type="button" title="自渲染的弹幕面板（默认关：只留画面；想看聊天再打开）">
+            弹幕面板：关
+          </button>
+          <button id="btn-danmu-set" class="ghost" type="button" title="弹幕面板设置：显示几行、字号、贴哪个角">弹幕设置</button>
+          <button id="btn-gift" class="ghost" type="button" title="弹幕面板里是否显示礼物信息（默认关）。">礼物：关</button>
+          <button id="btn-rec-options" class="ghost" type="button" title="录制选项：录制目录 / 分段时长 / 录完自动合并 / 最长时长 / 磁盘保护">⚙ 录制选项</button>
+          <button id="btn-rec-stop-all" class="ghost danger" type="button" title="停止全部正在进行的录制">停止录制</button>
+          <button id="btn-help" class="ghost" type="button" title="快捷键和用法一览（F1 或 ? 也可以打开）">? 快捷键</button>
+          <button id="btn-fullscreen" class="ghost" type="button" title="全屏观看（F11 切换，Esc 退出）">全屏</button>
+          <button id="btn-rec-window" class="ghost" type="button" title="录制整个窗口画面（各瓦片拼成一张干净画面；全屏时录全屏）。快捷键 Ctrl+Shift+W">录窗口</button>
+          <button id="btn-clear" class="ghost danger" type="button" title="关闭全部房间（不退出登录）">清空</button>
+        </div>
+      </div>
+
+      <div id="grid">
+        <div id="empty">
+          <h2>还没有房间</h2>
+          <p>粘贴抖音直播间号或 <code>live.douyin.com/数字</code> 链接后点「添加」。</p>
+          <p class="hint">
+            想先看谁在播？切到上方「监控」，把直播间地址加进去，探测到开播后再一键打开。
+          </p>
+        </div>
+      </div>
+    </main>
+
+    <!-- ------------------------------ 监控 ------------------------------ -->
+    <main id="view-monitor" class="view hidden">
+      <div class="row">
+        <form id="mon-form" autocomplete="off">
+          <input
+            id="mon-input"
+            type="text"
+            placeholder="直播间号 / live.douyin.com/xxx / v.douyin.com 短链"
+            spellcheck="false"
+          />
+          <button id="mon-add" type="submit" class="primary">加入监控</button>
+        </form>
+
+        <div class="tools">
+          <input
+            id="mon-search"
+            type="search"
+            placeholder="搜索主播名 / 房间号"
+            spellcheck="false"
+            autocomplete="off"
+          />
+          <label class="quality-wrap" title="卡片排列顺序。默认按添加顺序固定不动，选「在播优先」会随状态变化重排。">
+            <span>排序</span>
+            <select id="mon-sort">
+              <option value="added" selected>添加顺序</option>
+              <option value="live">在播优先</option>
+              <option value="name">按名字</option>
+              <option value="recent">最近检测</option>
+            </select>
+          </label>
+          <label class="quality-wrap" title="每个房间的探测间隔。地址越多，一轮扫完全部就要越久；吐得太勤会被抖音验证码拦。">
+            <span>每</span>
+            <select id="mon-interval">
+              <option value="60">60 秒探 1 个</option>
+              <option value="120" selected>120 秒探 1 个</option>
+              <option value="180">3 分钟探 1 个</option>
+              <option value="300">5 分钟探 1 个</option>
+            </select>
+          </label>
+          <button id="mon-probe" class="ghost" type="button" title="立刻把所有地址探一遍">全部检测</button>
+          <button id="mon-probe-sel" class="ghost" type="button" title="只检测勾选的">检测选中</button>
+          <button id="mon-only-special" class="ghost" type="button" title="只显示标了★特别关注的房间">只看特别关注</button>
+        </div>
+
+        <div class="spacer"></div>
+        <div id="mon-sel-info">已选 0</div>
+        <button id="mon-open" class="primary" type="button" title="把勾选的直播间开到「观看」里">查看选中直播</button>
+      </div>
+
+      <div id="cards">
+        <div id="cards-empty">
+          <h2>监控列表是空的</h2>
+          <p>把常看的主播直播间地址加进来，会自动探测是否在播，开播时弹桌面通知。</p>
+          <p class="hint">探测是轻量的：隐藏窗口加载页面，但屏蔽了视频流，不会真的消耗视频带宽。</p>
+        </div>
+      </div>
+
+      <div id="mon-stats"></div>
+    </main>
+
+  <div id="fs-hint">F11 / Esc 退出全屏　·　鼠标移到屏幕顶部停一下可唤出工具栏</div>
+  <div id="top-hotspot"></div>
+  <!-- 整窗录制时给窗口加一圈明显的边框（贴边，不会被录进画面：录制裁的是各瓦片的视频区） -->
+  <div id="win-rec-frame" class="hidden">
+    <span id="win-rec-label" class="pos-top">● 正在录制整个窗口</span>
+  </div>
+
+  <!-- 录制选项：目录 / 分段 / 录完怎么处理 / 保护，全在一个菜单里 -->
+  <div id="rec-dialog" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-head">
+        <h2>录制选项</h2>
+        <button id="rec-dialog-close" class="ghost" type="button">关闭</button>
+      </div>
+
+      <section class="modal-sec">
+        <h3>录制目录（分段也放这里）</h3>
+        <div class="modal-row">
+          <code id="rec-out-dir" class="path-chip">…</code>
+          <button id="rec-choose-dir" class="ghost" type="button">更改目录</button>
+          <button id="rec-open-out-dir" class="ghost" type="button">打开目录</button>
+        </div>
+        <p class="modal-hint">每场录制一个子目录 <code>&lt;录制目录&gt;\&lt;直播间名&gt;_&lt;开始时间戳&gt;\</code>，分段和合成好的 mp4 都在里面。</p>
+      </section>
+
+      <section class="modal-sec">
+        <h3>分段</h3>
+        <div class="modal-row">
+          <label class="quality-wrap" title="每隔多久落一个分段文件。万一程序被杀/断电，最多只丢最后一个分段。">
+            <span>每</span>
+            <select id="rec-seg">
+              <option value="60000">1 分钟</option>
+              <option value="120000">2 分钟</option>
+              <option value="180000">3 分钟</option>
+              <option value="300000" selected>5 分钟</option>
+              <option value="600000">10 分钟</option>
+              <option value="1800000">30 分钟</option>
+              <option value="0">不分段</option>
+            </select>
+            <span>一段</span>
+          </label>
+        </div>
+      </section>
+
+      <section class="modal-sec">
+        <h3>录完怎么处理</h3>
+        <div class="modal-row">
+          <label class="modal-check" title="停止录制时自动把所有分段合并成一个 mp4（纯转封装，几秒完成），分段文件随后删掉。">
+            <input id="rec-merge-auto" type="radio" name="rec-merge" value="auto" checked /> 自动合并成一个 mp4
+          </label>
+          <label class="modal-check" title="停止时不合并，直接把 part0000.mkv、part0001.mkv… 留在目录里，之后可在「剪辑」页签自己合并或挑着用。">
+            <input id="rec-merge-keep" type="radio" name="rec-merge" value="keep" /> 保留分段（自己合并）
+          </label>
+        </div>
+        <p class="modal-hint">分段只是为了「断电 / 强杀只丢最后一段」，正常停止时合并那一步几乎不花时间（<code>-c copy</code> 不重编码）。</p>
+      </section>
+
+      <section class="modal-sec">
+        <h3>保护</h3>
+        <div class="modal-row">
+          <label class="quality-wrap" title="单次录制最长多久。到点自动停止并保存成片；0 = 不限。">
+            <span>最长</span>
+            <input id="rec-max-min" type="number" min="0" max="1440" step="5" class="num-input" />
+            <span>分钟（0 = 不限）</span>
+          </label>
+          <label class="quality-wrap" title="磁盘剩余低于这个值就拒绝开始新录制（正在录的会继续，直到真的没空间）。">
+            <span>磁盘余量低于</span>
+            <input id="rec-min-free" type="number" min="0" max="102400" step="256" class="num-input" />
+            <span>MB 就拒绝开录</span>
+          </label>
+        </div>
+      </section>
+
+      <p class="modal-hint" id="rec-dialog-hint"></p>
+    </div>
+  </div>
+
+  <!-- ------------------------------ 剪辑 ------------------------------ -->
+  <main id="view-edit" class="view hidden">
+    <div class="row">
+      <div class="edit-dir-wrap">
+        <span class="edit-dir-label">目录</span>
+        <input id="edit-dir" type="text" readonly spellcheck="false" />
+        <button id="edit-choose-dir" class="ghost" type="button" title="默认就是录制目录；也可以临时切到别的目录挑文件">换目录</button>
+        <button id="edit-follow-rec" class="ghost" type="button" title="回到录制目录">跟随录制目录</button>
+        <button id="edit-refresh" class="ghost" type="button" title="立刻重新读一遍这个目录（自动刷新关掉时用）">刷新</button>
+        <label class="bar-check" title="每 3 秒自动重读当前目录，新录制完成、合并产物、外部增删都会自己出现。内容没变时不会重绘，不会打乱滚动和勾选。">
+          <input id="edit-auto-refresh" type="checkbox" /> 自动刷新
+        </label>
+        <span id="edit-refresh-at" class="edit-refresh-at"></span>
+        <button id="edit-open-dir" class="ghost" type="button">打开目录</button>
+      </div>
+      <div class="spacer"></div>
+      <div id="edit-sel-info">已选 0</div>
+    </div>
+
+    <div class="edit-body">
+      <section class="edit-pane edit-files-pane">
+        <div class="edit-pane-head">
+          <h3>视频文件</h3>
+          <label class="modal-check" title="选中当前目录下的全部视频文件（含各子目录里的分段）"><input id="edit-sel-all" type="checkbox" /> 全选全部</label>
+        </div>
+        <div id="edit-files" class="edit-files"></div>
+        <div class="edit-actions">
+          <input id="edit-out-name" type="text" placeholder="输出文件名（留空自动生成）" spellcheck="false" />
+          <label class="modal-check" title="勾上之后「合并」会边合并边把水印烧进去，只解码重编码一次；不勾就是纯封装（几秒钟，无水印）。">
+            <input id="edit-merge-wm" type="checkbox" /> 合并时一起加水印
+          </label>
+          <button id="edit-merge" class="primary" type="button" disabled title="按修改时间从早到晚拼接（列表里的 #1 #2 #3 就是拼接顺序）">合并选中</button>
+          <button id="edit-apply-wm" class="primary" type="button" disabled>单独加水印</button>
+        </div>
+        <p class="modal-hint" id="edit-status"></p>
+      </section>
+
+      <section class="edit-pane edit-wm-pane">
+        <div class="edit-pane-head">
+          <h3>水印设置</h3>
+          <button id="edit-wm-reset" class="ghost" type="button">重置</button>
+        </div>
+
+        <div class="wm-grid">
+          <label class="wm-field">
+            <span>类型</span>
+            <select id="wm-mode">
+              <option value="text" selected>文字</option>
+              <option value="image">图片 / Logo</option>
+              <option value="both">文字 + 图片</option>
+            </select>
+          </label>
+          <label class="wm-field wm-wide">
+            <span>文字</span>
+            <input id="wm-text" type="text" placeholder="例如：@某某 直播录像" spellcheck="false" />
+          </label>
+          <label class="wm-field wm-wide">
+            <span>字体</span>
+            <span class="wm-image-row">
+              <select id="wm-font" title="水印用的字体（只列出系统里存在的）"></select>
+              <button id="wm-pick-font" class="ghost" type="button" title="用其它字体文件（.ttf / .ttc / .otf）">自定义</button>
+            </span>
+          </label>
+          <label class="wm-field">
+            <span>字号</span>
+            <input id="wm-size" type="number" min="8" max="200" step="2" value="28" />
+          </label>
+          <label class="wm-field">
+            <span>颜色</span>
+            <input id="wm-color" type="color" value="#FFFFFF" />
+          </label>
+          <label class="wm-field">
+            <span>透明度</span>
+            <input id="wm-opacity" type="number" min="0.05" max="1" step="0.05" value="0.85" />
+          </label>
+          <label class="wm-field">
+            <span>位置</span>
+            <select id="wm-pos">
+              <option value="tl">左上</option>
+              <option value="tc">上中</option>
+              <option value="tr">右上</option>
+              <option value="ml">左中</option>
+              <option value="mc">居中</option>
+              <option value="mr">右中</option>
+              <option value="bl">左下</option>
+              <option value="bc">下中</option>
+              <option value="br" selected>右下</option>
+            </select>
+          </label>
+          <label class="wm-field">
+            <span>漂移</span>
+            <select id="wm-motion" title="让水印动起来（防盗录更管用）。选漂移时「位置」就不起作用了。">
+              <option value="static" selected>不动</option>
+              <option value="scroll-x">横向滚动</option>
+              <option value="scroll-y">纵向滚动</option>
+              <option value="diagonal">斜向滚动</option>
+              <option value="bounce">满屏反弹</option>
+            </select>
+          </label>
+          <label class="wm-field">
+            <span>漂移速度</span>
+            <input id="wm-speed" type="number" min="5" max="2000" step="5" value="120" title="像素/秒（反弹模式当作快慢系数）" />
+          </label>
+          <label class="wm-field">
+            <span>编码器</span>
+            <select id="wm-encoder" title="显卡 NVENC 大约快一倍（实测 60 秒 1080p：软件 4.1s → 显卡 2.0s），体积略大。">
+              <option value="x264" selected>软件 x264（体积小）</option>
+              <option value="nvenc">显卡 NVENC（快一倍）</option>
+            </select>
+          </label>
+          <label class="wm-field">
+            <span>只加前 N 个</span>
+            <input id="wm-first-n" type="number" min="0" max="999" step="1" value="0" title="0 = 全部；比如填 3 就只给排序后的前 3 个片段加水印，其余原样不动。" />
+          </label>
+          <label class="wm-field">
+            <span>边距</span>
+            <input id="wm-margin" type="number" min="0" max="200" step="4" value="20" />
+          </label>
+          <label class="wm-field modal-check">
+            <span>阴影</span>
+            <input id="wm-shadow" type="checkbox" checked />
+          </label>
+          <label class="wm-field wm-wide">
+            <span>图片</span>
+            <span class="wm-image-row">
+              <input id="wm-image" type="text" readonly placeholder="选择 png / jpg（PNG 支持透明）" spellcheck="false" />
+              <button id="wm-pick-image" class="ghost" type="button">选择</button>
+              <button id="wm-clear-image" class="ghost" type="button">清除</button>
+            </span>
+          </label>
+          <label class="wm-field">
+            <span>图片大小</span>
+            <input id="wm-image-scale" type="number" min="0.03" max="0.6" step="0.01" value="0.15" />
+          </label>
+          <label class="wm-field">
+            <span>只在</span>
+            <span class="wm-range">
+              <input id="wm-from" type="number" min="0" step="1" placeholder="0" /> –
+              <input id="wm-to" type="number" min="0" step="1" placeholder="结束" /> 秒
+            </span>
+          </label>
+        </div>
+
+        <p class="modal-hint" id="wm-hint"></p>
+      </section>
+    </div>
+  </main>
+
+    <!-- ------------------------------ 调试 ------------------------------ -->
+    <main id="view-debug" class="view hidden">
+      <div class="row">
+        <strong class="row-title">调试：房间占用的资源</strong>
+        <label class="bar-check" title="每 2 秒自动重读一次">
+          <input id="dbg-auto" type="checkbox" checked /> 自动刷新
+        </label>
+        <button id="dbg-refresh" class="ghost" type="button">刷新</button>
+        <button id="dbg-close-all" class="ghost danger" type="button" title="关掉所有观看瓦片，2 秒后再读一次，比较关闭前后的页面/进程">关闭全部并检查释放</button>
+        <button id="dbg-save" class="ghost" type="button" title="把当前快照写成 JSON 存到 %APPDATA%\ParallelRoom\debug-snapshot-*.json">保存快照</button>
+        <span id="dbg-summary" class="hint"></span>
+      </div>
+      <div class="dbg-body">
+        <section class="dbg-sec">
+          <h3>1. 正在观看的房间（页面里的音源）</h3>
+          <p class="dbg-note">
+            <b>页面媒体元素数</b>＝这一页里有几个 <code>&lt;video&gt;</code>/<code>&lt;audio&gt;</code>（普通直播间就是 1）；
+            <b>同时出声的音源数</b>＝其中"没暂停 + 没静音 + 音量&gt;0"的有几个，正数只有 1 就是正常。
+            大于 1 说明这一页里同时有多个东西在响 —— 这才是"听到别的直播间声音"的原因。
+            「页面在产生音频」只是说页面在解码音频（被静音时也会是"是"），判断有没有声音看「同时出声的音源数」。
+          </p>
+          <div id="dbg-tiles" class="dbg-table"></div>
+        </section>
+        <section class="dbg-sec">
+          <h3>2. webContents 现状</h3>
+          <div id="dbg-contents" class="dbg-table"></div>
+        </section>
+        <section class="dbg-sec">
+          <h3>3. 生命周期（关掉之后有没有真的销毁）</h3>
+          <p class="dbg-note">✅ 已释放 / ⏳ 仍在。销毁时间为空且类型是 webview 的，就是还没释放的页面。</p>
+          <div id="dbg-life" class="dbg-table"></div>
+        </section>
+        <section class="dbg-sec">
+          <h3>4. 进程与分流地址</h3>
+          <div id="dbg-procs" class="dbg-table"></div>
+        </section>
+      </div>
+    </main>
+
+    <!-- 快捷键 / 用法一览（F1 或 ? 打开） -->
+    <div id="help-dialog" class="modal hidden">
+      <div class="modal-box help-box">
+        <div class="modal-head">
+          <h2>快捷键 / 用法一览</h2>
+          <button id="help-close" class="ghost" type="button">关闭</button>
+        </div>
+
+        <section class="modal-sec">
+          <h3>全局快捷键（焦点在抖音画面里也能用）</h3>
+          <table class="help-table">
+            <tbody>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd></td><td>录制 / 停止 <b>鼠标所在的那个瓦片</b></td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd></td><td>停止全部录制</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>W</kbd></td><td>整窗录制 开 / 关</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>H</kbd></td><td>显示 / 隐藏顶部工具栏</td></tr>
+              <tr><td><kbd>F11</kbd></td><td>全屏观看（<kbd>Esc</kbd> 退出）</td></tr>
+              <tr><td><kbd>F1</kbd> / <kbd>?</kbd></td><td>打开这张表</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="modal-sec">
+          <h3>观看页</h3>
+          <table class="help-table">
+            <tbody>
+              <tr><td>双击瓦片顶栏</td><td>单间放大 / 还原</td></tr>
+              <tr><td>按住顶栏拖动</td><td>换位置（聚焦布局里：小窗排序，拖到大画面就换到中间）</td></tr>
+              <tr><td><kbd>1</kbd>~<kbd>9</kbd></td><td>聚焦布局下：把第 N 号瓦片换到中间</td></tr>
+              <tr><td>右键瓦片顶栏</td><td>这个房间单独设画质（其他房间不受影响）</td></tr>
+              <tr><td><kbd>Esc</kbd></td><td>退出单间放大</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="modal-sec">
+          <h3>布局</h3>
+          <table class="help-table">
+            <tbody>
+              <tr><td>「中间大 · 右侧小窗」</td><td>点小窗 → 换到中间；中间那条分隔线可以左右拖，双击复位</td></tr>
+              <tr><td>右侧小窗放不下</td><td>出竖向滚动条，主画面钉住不动</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <p class="modal-hint">完整说明（含录制管线、虎牙支持情况、已知限制）在项目根目录的 README.md。</p>
+      </div>
+    </div>
+
+    <script src="app.js">></script>
+  </body>
+</html>

@@ -1,0 +1,55 @@
+{
+  "name": "parallel-room",
+  "productName": "ParallelRoom",
+  "version": "0.1.0",
+  "private": true,
+  "description": "同一抖音账号并行进入多个直播间的桌面工具（Electron + 多 webview）",
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "electron .",
+    "start:log": "set PR_LOG=1 && electron .",
+    "install:electron": "node node_modules/electron/install.js",
+    "check": "node --check src/main/main.js && node --check src/main/preload.js && node --check src/main/probe.js && node --check src/main/watchers.js && node --check src/main/recorder.js && node --check src/recorder/recorder.js && node --check src/renderer/app.js",
+    "shortcut": "powershell -ExecutionPolicy Bypass -File ./make-shortcut.ps1",
+    "shortcut:remove": "powershell -ExecutionPolicy Bypass -File ./make-shortcut.ps1 -Remove",
+    "pack": "electron-builder --win dir --x64",
+    "dist": "electron-builder --win nsis --x64"
+  },
+  "devDependencies": {
+    "electron": "45.1.0",
+    "electron-builder": "^26.18.0"
+  },
+  "build": {
+    "appId": "com.parallelroom.app",
+    "productName": "ParallelRoom",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "package.json",
+      "!**/*.log",
+      "!**/.tmp/**"
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "ParallelRoom-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "ParallelRoom"
+    }
+  }
+}
