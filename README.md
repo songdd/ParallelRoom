@@ -14,7 +14,9 @@
 
 因为要重编码，**同时只能录 1 路**，且与单房间的屏幕兜底录制互斥（直录流不受影响）。想让每个房间各自成文件、拿到 1080p 原画，用瓦片上的 `⏺` 直录流。
 
-**并发**：可以多个房间同时录。直录流每路只是一个 ffmpeg 进程（`-c copy` 不转码），**最多同时 8 路**；屏幕捕获因为要解码+重编码，**同时只允许 1 路**。实测 3 路同时录 25 秒，产出 3 个 1080p60 文件：```
+**并发**：可以多个房间同时录。直录流每路只是一个 ffmpeg 进程（`-c copy` 不转码），**最多同时 8 路**；屏幕捕获因为要解码+重编码，**同时只允许 1 路**。实测 3 路同时录 25 秒，产出 3 个 1080p60 文件：
+
+```
 dota pk4丶_...mp4        16.59 MB
 dota大熊小清新_...mp4     28.47 MB   1920x1080 hevc 60fps + aac 2ch  28.5s
 dota老花一打九_...mp4     19.40 MB
@@ -1174,7 +1176,7 @@ final: actives=0 pending=0   —— 不会无限重试
 
 判断依据就是每个瓦片的 live 状态（`t.pokeAt` / `t.frozenSince` / `t.autoReloadCount`），刷新间隔 2 秒，刷新完立刻消失。卡住自愈的完整规则见下面的「观看时"卡住"是怎么回事」。
 
-#### 时间列 = 本地时间（日志文件里存的是 UTC）
+### 时间列 = 本地时间（日志文件里存的是 UTC）
 
 日志行是 `new Date().toISOString()` 写的，也就是 **UTC**；`slice(11, 19)` 直接截出来会比北京时间**早 8 小时**（20:27 录的那条显示成 12:27），而且同一行里 `output\…_20261120-202713.mp4` 这个路径又是本地时间，自相矛盾。现在主进程 `logTimeParts()` 在读日志时就把 UTC 换成系统本地时间，**跨天的行前面补 `月-日`**，鼠标悬停能看到原文：
 
@@ -2989,15 +2991,143 @@ body           类 "dm-pos-br"，CSS 变量 --dm-font: 15px
 
 ## 环境要求
 
-- Windows 桌面会话（Electron 需要交互式桌面）。
-- 依赖被装在 `node_modules`，若 `node_modules/electron/dist` 缺失（`npm install` 时二进制没下下来），用镜像补一次：
+- Windows 10/11 x64 桌面会话（Electron 需要交互式桌面）。
+- 不要在限制性沙箱里运行（Chromium 需要进程间命名管道，被禁止时会卡在初始化或秒退）。
+
+工具链版本（本仓库**实测通过**的那一套，别的版本没验证过）：
+
+| 组件 | 版本 | 用在哪 |
+| --- | --- | --- |
+| Node.js | **v24.14.1**（`npm -v` = 11.19.1） | 跑脚本、打 bundle、electron-builder |
+| Electron | **45.1.0**（内部 Chromium 156 / Node 24.22.1） | 开发运行 + 随包运行时 |
+| electron-builder | **26.18.0** | 出 NSIS 安装包 + 绿色版 zip |
+| esbuild | **0.28.2** | 把 `studio.js` / `stage.js` 打成 IIFE bundle |
+| PowerShell | 5.1（系统自带）或 7.x 都行 | `build-installer.ps1` |
+| ffmpeg | 任意带 `ffmpeg.exe` + `ffprobe.exe` 的构建（本机 8.1.1 essentials） | 录制 / 剪辑 / 生成图标 |
+| Git | 可选 | 只有推代码要 |
+
+依赖装在 `node_modules`；若 `node_modules/electron/dist` 缺失（`npm install` 时二进制没下下来），用镜像补一次：
 
 ```powershell
 $env:ELECTRON_MIRROR = "https://npmmirror.com/mirrors/electron/"
 node .\node_modules\electron\install.js
 ```
 
-- 不要在限制性沙箱里运行（Chromium 需要进程间命名管道，被禁止时会卡在初始化或秒退）。
+## 从源码编译（改代码 → 跑起来 → 出安装包）
+
+这个项目**没有 webpack / 没有 tsc / 没有热更新服务器**，编译链只有两件事：**esbuild 打两个 bundle** + **electron-builder 打包**。四步走完就有安装包。
+
+### 0. 一次性的：装依赖
+
+```powershell
+cd D:\code\ParallelRoom
+npm install                 # 装 electron / electron-builder / esbuild / three / @pixiv/three-vrm
+npm run check               # 语法检查（7 个文件 node --check），应该退出码 0
+```
+
+### 1. 渲染层的两个 bundle（改了就必须重打）
+
+页面是 `file://` 加载的，**大多数文件不用编译**，直接读源码：
+
+| 文件 | 要不要编译 |
+| --- | --- |
+| `src/renderer/app.js` / `index.html` / `styles.css` | **不用**，改完 Ctrl+R 就生效 |
+| `src/main/*.js`（主进程） | **不用**，改完要**完全退出重启** |
+| `src/renderer/studio.js`（虚拟演播室） | **要**：`npm run build:studio` → `studio.bundle.js` |
+| `src/renderer/stage.js`（虚拟人舞台，three.js + VRM） | **要**：`npm run build:stage` → `stage.bundle.js` |
+
+```powershell
+npm run build:render        # = build:studio + build:stage
+# 等价于分别跑 esbuild：
+#   esbuild src/renderer/studio.js --bundle --format=iife --target=chrome120 --outfile=src/renderer/studio.bundle.js
+#   esbuild src/renderer/stage.js  --bundle --format=iife --target=chrome120 --outfile=src/renderer/stage.bundle.js
+```
+
+> 为什么是 bundle 而不是 `<script type="module">`：`three` / `@pixiv/three-vrm` 是 ESM，页面又是 `file://`，直接 import 会被 CORS 与 MIME 卡住；打成 IIFE 挂到 `window` 上最省事。
+> **踩过的坑**：只改了 `studio.js` 没重打 → 运行时 `t.studio.setVideoUrl is not a function`（旧 bundle 里根本没收这个方法）。
+
+### 2. 跑起来（开发态）
+
+```powershell
+npm start                   # 等同 start.bat：走 node_modules\electron
+npm run start:log           # 同上 + PR_LOG=1，主进程日志写到 %APPDATA%\ParallelRoom\main.log
+```
+
+调试用的几个环境变量（都在启动前设，PowerShell 里 `$env:XXX='...'`）：
+
+| 变量 | 作用 |
+| --- | --- |
+| `PR_LOG=1` | 主进程日志落盘（调试页第 5 节「主进程日志」才有内容） |
+| `PR_DATA_DIR=<目录>` | 换一套用户数据（登录态 / 房间列表 / 日志）——**测破坏性改动时用它，别动你自己的 `%APPDATA%\ParallelRoom`** |
+| `PR_FFMPEG=<ffmpeg.exe>` | 指定 ffmpeg；不指定就按 `resources\ffmpeg` → `vendor\ffmpeg` → `PATH` → `D:\tools\ffmpeg-8.1.1-essentials_build\bin` 顺序找 |
+| `PR_LOG` + `--remote-debugging-port=93xx` | 用 CDP 脚本读页面/瓦片状态，自动化验证用得上 |
+
+录制的默认输出目录：开发态是**项目下的 `output\`**，安装版是「视频」库下的 `ParallelRoom\`。
+
+### 3. 打安装包（三种粒度）
+
+```powershell
+npm run pack                     # 最快：只出 dist\win-unpacked\（免安装目录，双击 exe 就能验）
+npm run dist                     # NSIS 安装包 + 绿色版 zip（zip 里还没有 portable.txt，见下条）
+npm run dist:nsis                # 只要安装包
+npm run dist:zip                 # 只要 zip
+```
+
+**推荐用脚本**（它把上面这些都包了，还会补 zip 里缺的东西）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build-installer.ps1            # 安装包 + 绿色版
+powershell -ExecutionPolicy Bypass -File .\build-installer.ps1 -DirOnly   # 只要免安装目录（自检最快）
+powershell -ExecutionPolicy Bypass -File .\build-installer.ps1 -ZipOnly   # 只要绿色版 zip
+powershell -ExecutionPolicy Bypass -File .\build-installer.ps1 -SkipRender  # 渲染层没改时跳过 esbuild
+```
+
+脚本依次做 7 件事（对应输出里的 `0/7 … 7/7`）：
+
+1. 检查 node / npm / electron / electron-builder 是否齐；
+2. 准备 **Electron 离线缓存**（把本机 `npm install` 下过的 zip 硬链接到 electron-builder 认的 github-hash 目录，并补 `SHASUMS256.txt-<ver>` 种子——否则国内网络会卡在 `packaging` 那一步）；
+3. 检查 `vendor\ffmpeg\ffmpeg.exe` + `ffprobe.exe`（安装版必须随包，不然录制/剪辑用不了）；
+4. 检查/生成图标 `build\icon.ico`；
+5. `npm run check`；
+6. `npm run build:render`；
+7. `electron-builder --win nsis zip --x64` → **把 `build\portable.txt` 写进 zip 根目录**（解压即便携模式）→ 校验 zip 条目 → 打印体积 + 签名状态。
+
+产物（版本号取自 `package.json`）：
+
+| 文件 | 说明 |
+| --- | --- |
+| `dist\ParallelRoom-Setup-<版本>.exe` | NSIS 安装包，per-user、可改安装目录、自动建快捷方式 |
+| `dist\ParallelRoom-<版本>-portable-win-x64.zip` | 绿色版：解压到任意目录双击 `ParallelRoom.exe`，数据在旁边的 `data\` |
+| `dist\win-unpacked\` | 免安装目录，最快的自检产物（`npm run pack` 就够） |
+
+校验成品：
+
+```powershell
+Get-FileHash .\dist\ParallelRoom-Setup-0.1.1.exe -Algorithm SHA256
+Get-FileHash .\dist\ParallelRoom-0.1.1-portable-win-x64.zip -Algorithm SHA256
+# 绿色版 zip 里必须有这 5 个条目（缺 portable.txt 就不会进便携模式）
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$z = [System.IO.Compression.ZipFile]::OpenRead("$PWD\dist\ParallelRoom-0.1.1-portable-win-x64.zip")
+$z.Entries.FullName | Where-Object { $_ -match 'ParallelRoom.exe$|resources/app.asar$|resources/ffmpeg/(ffmpeg|ffprobe).exe$|portable.txt$' }
+$z.Dispose()
+```
+
+### 4. 编译链上的已知坑（都实测踩过）
+
+| 症状 | 原因 | 解法 |
+| --- | --- | --- |
+| `electron-builder` 卡在 `packaging platform=win32 arch=x64` | 去 github 拉 electron zip（国内基本连不上） | 脚本第 2 步已经把缓存摆好；手动跑 `npm run dist` 前先跑一次 `build-installer.ps1` |
+| `npm run check` 明明没语法错却报错 | PowerShell 把 esbuild 的 stderr 当 `NativeCommandError` | 别把输出接 `2>&1` 再转 `Out-Host`；`build-installer.ps1` 里用的是裸 `& npm.cmd @args` + `$LASTEXITCODE` |
+| `.ps1` 报 `Unexpected token '}'` | 文件被存成**无 BOM 的 UTF-8**，PowerShell 5.1 按 GBK 读中文注释就炸 | `build-installer.ps1` 必须存成 **UTF-8 with BOM** |
+| 重打包报 `app.asar` 被占用 / `EBUSY` | 打包前的旧进程还开着 `dist\win-unpacked\resources\app.asar` | 先关掉 `ParallelRoom.exe`（含 `electron.exe --user-data-dir=...` 的测试实例）再打 |
+| 界面没变化 | 改的是 `studio.js` / `stage.js` 却没重打 bundle | `npm run build:render` |
+
+### 一条命令速查
+
+```powershell
+npm install; npm run check; npm run build:render; npm start          # 开发跑起来
+powershell -ExecutionPolicy Bypass -File .\build-installer.ps1       # 出安装包 + 绿色版
+```
 
 ## 启动方式（四种，任选）
 
@@ -3009,6 +3139,8 @@ node .\node_modules\electron\install.js
 | 安装包 | `build-installer.ps1` → `dist\ParallelRoom-Setup-<版本>.exe` | 双击安装（可选目录、自动建桌面+开始菜单快捷方式），装到 `%LOCALAPPDATA%\Programs\ParallelRoom`，控制面板可卸载 |
 
 ## 打包（`build-installer.ps1`）
+
+> 编译链总览（依赖 → bundle → 运行 → 打包）见上面的「从源码编译」一节；这一节只讲打包本身。
 
 一条命令出两个成品（在仓库根目录，几分钟）：
 
