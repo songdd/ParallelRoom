@@ -28,6 +28,8 @@ contextBridge.exposeInMainWorld('pr', {
 
   // 调试页：资源快照 / 保存快照 / 手工释放
   debugSnapshot: () => ipcRenderer.invoke('debug:snapshot'),
+  /** 调试页日志面板：rec.log / main.log 的尾巴，逐行带 level（error / warn / info） */
+  debugLogs: (opts) => ipcRenderer.invoke('debug:logs', opts || {}),
   debugSave: (payload) => ipcRenderer.invoke('debug:save', payload),
   debugRelease: (webContentsId) => ipcRenderer.invoke('debug:release', webContentsId),
 
@@ -63,6 +65,10 @@ contextBridge.exposeInMainWorld('pr', {
   recProbeDuration: (file) => ipcRenderer.invoke('rec:probe-duration', file),
   stopAllRecording: () => ipcRenderer.invoke('rec:stop-all'),
   recPing: () => ipcRenderer.invoke('rec:ping'),
+  /** 往 rec.log 里记一笔界面侧的事（瓦片卡住 / 自动重载等），调试页第 5 节能看到 */
+  uiLog: (kind, msg) => ipcRenderer.invoke('ui:log', kind, msg),
+  /** 页面主线程卡死：崩掉渲染进程再重载（普通 reload 排不进队） */
+  tileHardReload: (webContentsId) => ipcRenderer.invoke('tile:hard-reload', webContentsId),
   recMode: (webContentsId) => ipcRenderer.invoke('rec:mode', webContentsId),
   recOutDir: () => ipcRenderer.invoke('rec:out-dir'),
   chooseRecDir: () => ipcRenderer.invoke('rec:choose-out-dir'),

@@ -723,6 +723,19 @@
           <h3>4. 进程与分流地址</h3>
           <div id="dbg-procs" class="dbg-table"></div>
         </section>
+        <section class="dbg-sec">
+          <h3>5. 日志（录制 / 主进程，错误标红）</h3>
+          <p class="dbg-note">
+            「录制日志」= <code>%APPDATA%\ParallelRoom\rec.log</code>（常开，录制/合并/取流全在里面）；
+            「主进程日志」= <code>main.log</code>（要设 <code>PR_LOG=1</code> 才有内容）。
+            错误行整行标红并带 <b>ERR</b> 标签，警告行标黄（重试 / 换线路 / 跳过这类）；「只看错误」只留红黄两档。
+            时间列显示的是<b>本地时间</b>（日志文件里存的是 UTC，面板已换算；不是今天的行会补上「月-日」，鼠标悬停可看原文时间）。
+          </p>
+          <label class="bar-check">
+            <input id="dbg-log-errors" type="checkbox" /> 只看错误
+          </label>
+          <div id="dbg-logs" class="dbg-logs"></div>
+        </section>
       </div>
     </main>
 

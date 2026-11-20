@@ -2981,6 +2981,104 @@ body.fs #win-rec-frame {
   font-variant-numeric: tabular-nums;
 }
 
+/* -------------------------- 调试页 · 日志面板 -------------------------- */
+.dbg-logs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dbg-log-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 2px 0 4px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #cfd4e2;
+}
+
+.dbg-log-head .dbg-sub {
+  font-weight: 400;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dbg-log-body {
+  max-height: 220px;
+  overflow: auto;
+  padding: 4px 6px;
+  background: #0d1015;
+  border: 1px solid #1e222c;
+  border-radius: 6px;
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.dbg-log-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 1px 0;
+  color: #8f97a8;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.dbg-log-row .dbg-log-t {
+  flex: 0 0 auto;
+  color: #5d6577;
+  font-variant-numeric: tabular-nums;
+}
+
+.dbg-log-row .dbg-log-x {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* 错误：整行红底 + 红字，一眼找到 */
+.dbg-log-row.lv-error {
+  color: #ffb4b4;
+  background: rgba(220, 66, 66, 0.12);
+  border-left: 2px solid #e2564b;
+  padding-left: 4px;
+}
+
+/* 警告：黄字（重试 / 换线路 / 跳过这类） */
+.dbg-log-row.lv-warn {
+  color: #f0d08a;
+  border-left: 2px solid #b8901f;
+  padding-left: 4px;
+}
+
+.log-err-tag,
+.log-warn-tag,
+.log-info-tag {
+  flex: 0 0 auto;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 0 4px;
+  border-radius: 3px;
+}
+
+.log-err-tag {
+  color: #fff;
+  background: #c8372e;
+}
+
+.log-warn-tag {
+  color: #231a04;
+  background: #d9b45a;
+}
+
+.log-info-tag {
+  color: #5d6577;
+  background: transparent;
+}
+
 .dbg-empty {
   margin: 0;
   font-size: 11px;
@@ -3480,6 +3578,50 @@ kbd {
   background: #2c4a8a;
   border-color: #4a7bd0;
   color: #fff;
+}
+
+/* 表演者来源那一行：摄像头 / 视频文件 */
+.sp-perf {
+  align-items: center;
+}
+
+.sp-perf-label {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: #8b93a5;
+  margin-right: 2px;
+}
+
+.sp-perf-btn {
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  font-size: 11.5px;
+  color: #cfd6e6;
+  background: #1b2231;
+  border: 1px solid #2b3446;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.sp-perf-btn:hover {
+  background: #26314a;
+  color: #fff;
+}
+
+.sp-perf-btn.on {
+  background: #2c4a8a;
+  border-color: #4a7bd0;
+  color: #fff;
+}
+
+.sp-perf-info {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: #7f8899;
 }
 
 .sp-sec {

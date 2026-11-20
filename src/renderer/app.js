@@ -1276,16 +1276,175 @@ function setOtherRoom(uid, flag) {
     : ''
 }
 
+/* ------------------------- 卡住 / 卡顿的自检测与自愈 ------------------------- */
+/*
+ * 用户看到「看着看着卡住」时，其实是两种完全不同的东西：
+ *  1) 页面主线程卡住：抖音/虎牙的重房间（或已下播的房间）里，站点自己的 JS 把主线程占满，
+ *     这时 executeJavaScript 不返回、画面停住、点刷新/录制都没反应。实测这种页面能 73~110 秒不应答。
+ *  2) 画面冻住但页面还活着：播放器在缓冲 / 换 CDN / 流断了，currentTime 不往前走。
+ * 两种都在这里盯：
+ *  · 主线程卡：上一轮还没回来就不再派新的（越叠越死），持续 15 秒自动 reload 一次
+ *  · 画面冻：连续 25 秒 currentTime 不动，先 play()，还不动就 reload 一次
+ *  · 同一个瓦片 3 分钟内最多自动重载一次，避免"永远在重载"
+ * 每次自动重载都写进 rec.log（调试页第 5 节可见），下次再卡能对得上时间点。
+ */
+/** 页面主线程多久不答应算卡住 */
+const STUCK_JS_MS = 3000
+/** 卡这么久就自动重载（≈3 轮 watchdog） */
+const STUCK_RELOAD_MS = 15000
+/** 画面时间多久不前进算冻住 */
+const FROZEN_RELOAD_MS = 25000
+/** 同一瓦片两次自动重载的最小间隔 */
+const AUTO_RELOAD_GAP_MS = 3 * 60 * 1000
+
+/** 记一笔到 rec.log（失败就算了，不影响播放） */
+function uiLog(kind, msg) {
+  try {
+    Promise.resolve(window.pr.uiLog(kind, msg)).catch(() => {})
+  } catch {}
+}
+
+/**
+ * 自动重载一个瓦片（节流）。
+ * @returns {boolean} 这次到底重载了没有
+ */
+function tileAutoReload(uid, why, overlayText) {
+  const t = tiles.get(uid)
+  if (!t || t.local || t.camera || t.studio || t.stage) return false
+  const now = Date.now()
+  if (t.autoReloadAt && now - t.autoReloadAt < AUTO_RELOAD_GAP_MS) return false
+  t.autoReloadAt = now
+  t.autoReloadCount = (t.autoReloadCount || 0) + 1
+  t.pokeAt = 0
+  t.stuckSince = 0
+  t.stuckShown = false
+  t.frozenSince = 0
+  t.frozenShown = false
+  t.pokes = 0
+  uiLog('tile', `${why} → auto reload #${t.autoReloadCount} ${roomLabel(t.url)} ${uid}`)
+  if (statusEl) statusEl.textContent = `${why}，正在自动重载这一格…（已第 ${t.autoReloadCount} 次）`
+  showOverlay(t, overlayText || '卡住了，正在自动重载…')
+  // 主线程卡死时 view.reload() 是排不进队的（渲染进程自己都在死循环里），
+  // 只能让主进程把这个渲染进程崩掉、再重载 —— 等于换一个干净进程重开这一格。
+  const hard = /卡住|没响应/.test(why)
+  let wcId = 0
+  try {
+    wcId = t.view.getWebContentsId()
+  } catch {}
+  const softReload = () => {
+    try {
+      t.view.reload()
+    } catch {
+      showOverlay(t, '自动重载失败，点这一格上的 ⟳ 手动刷新', true)
+    }
+  }
+  if (hard && wcId > 0) {
+    t.crashReload = true
+    Promise.resolve(window.pr.tileHardReload(wcId))
+      .then((r) => {
+        if (!r || !r.ok) {
+          t.crashReload = false
+          uiLog('tile', `hard reload failed: ${(r && r.error) || 'unknown'} → fallback reload`)
+          softReload()
+        }
+      })
+      .catch(() => {
+        t.crashReload = false
+        softReload()
+      })
+    return true
+  }
+  softReload()
+  return true
+}
+
+/** 这个瓦片是不是正在录（录制中自动重载会断流，所以阈值放宽） */
+function tileRecording(uid) {
+  try {
+    return typeof recMap !== 'undefined' && recMap.has(uid)
+  } catch {
+    return false
+  }
+}
+
+/** 每次 watchdog 醒来都检查一次：上一轮是不是还没回来（= 主线程卡住） */
+function checkTileStuck(uid) {
+  const t = tiles.get(uid)
+  if (!t || !t.pokeAt) return
+  const now = Date.now()
+  const busyMs = now - t.pokeAt
+  if (busyMs < STUCK_JS_MS) return
+  t.stuckSince = t.stuckSince || now
+  const stuckMs = now - t.stuckSince
+  if (!t.stuckShown) {
+    t.stuckShown = true
+    if (statusEl) {
+      statusEl.textContent = `「${roomLabel(t.url)}」页面没响应 ${Math.round(busyMs / 1000)} 秒${
+        tileRecording(uid) ? '（正在录制，暂不自动重载）' : `（继续卡 ${Math.round(STUCK_RELOAD_MS / 1000)} 秒会自动重载这一格）`
+      }`
+    }
+  }
+  if (stuckMs >= STUCK_RELOAD_MS) {
+    // 正在录制的房间尽量别自动重载（重载会断流）；除非卡得离谱（45 秒）
+    const limit = tileRecording(uid) ? STUCK_RELOAD_MS * 3 : STUCK_RELOAD_MS
+    if (stuckMs >= limit) {
+      tileAutoReload(uid, `页面主线程卡住 ${Math.round(stuckMs / 1000)}s`, '页面卡住了，正在自动重载…')
+    }
+  }
+}
+
+/** 画面冻住检测：从每轮的 currentTime 看它有没有往前走 */
+function checkTileFrozen(uid, r) {
+  const t = tiles.get(uid)
+  if (!t || !r || typeof r.t !== 'number') return
+  const now = Date.now()
+  if (r.paused) {
+    // 暂停了说明不是"冻住"，是播放器停了：已经 play() 过了，等下一轮
+    t.frozenSince = 0
+    return
+  }
+  if (t.lastCt !== undefined && Math.abs(r.t - t.lastCt) < 0.1) {
+    t.frozenSince = t.frozenSince || now
+    const frozenMs = now - t.frozenSince
+    if (!t.frozenShown && frozenMs > 8000) {
+      t.frozenShown = true
+      if (statusEl) {
+        statusEl.textContent = `「${roomLabel(t.url)}」画面停了 ${Math.round(frozenMs / 1000)} 秒（在缓冲 / 换线路），继续停会自动重载`
+      }
+    }
+    if (frozenMs >= FROZEN_RELOAD_MS) {
+      const limit = tileRecording(uid) ? FROZEN_RELOAD_MS * 2 : FROZEN_RELOAD_MS
+      if (frozenMs >= limit) {
+        tileAutoReload(uid, `画面停住 ${Math.round(frozenMs / 1000)}s`, '画面停住了，正在自动重载…')
+      }
+    }
+  } else {
+    t.frozenSince = 0
+    t.frozenShown = false
+  }
+  t.lastCt = r.t
+}
+
 function pokeGuest(uid) {
   const t = tiles.get(uid)
   if (!t || t.local || t.camera || t.studio || t.stage) return
+  // 上一轮还没回来：页面主线程卡着。别再往上叠（叠只会越卡越死），交给 checkTileStuck 判重载
+  if (t.pokeAt) {
+    checkTileStuck(uid)
+    return
+  }
   // 前几轮顺带切画质（播放器重初始化后需要再切一次），之后就不再重复点
   const applyQuality = (t.pokes || 0) < 6
   t.pokes = (t.pokes || 0) + 1
+  const startedAt = Date.now()
+  t.pokeAt = startedAt
   try {
     const p = t.view.executeJavaScript(guestScript(t.muted, applyQuality, t.volume, tileQuality(t)), true)
     if (p && typeof p.then === 'function') {
       p.then((r) => {
+        if (t.pokeAt === startedAt) t.pokeAt = 0
+        t.stuckSince = 0
+        t.stuckShown = false
         if (!r || typeof r !== 'object') return
         setOtherRoom(uid, r.otherRoom === true)
         renderDanmu(uid, r.danmu)
@@ -1297,11 +1456,17 @@ function pokeGuest(uid) {
         } else {
           setTileQualityBadge(uid, r.q)
         }
+        checkTileFrozen(uid, r)
         reportTileStatus(uid, r)
-      }).catch(() => {})
+      }).catch(() => {
+        if (t.pokeAt === startedAt) t.pokeAt = 0
+      })
+    } else {
+      t.pokeAt = 0
     }
   } catch {
     // guest 未就绪
+    t.pokeAt = 0
   }
   // 虎牙：顺手把签名好的直录流地址报给主进程（录制用；每次重读，签名过期也能跟上）
   reportHuyaStream(uid, t)
@@ -2126,7 +2291,20 @@ const STUDIO_DEFAULTS = {
   zoom: 38,
   dolly: 6.4,
   height: 1.9,
-  scene: 'studio'
+  scene: 'studio',
+  // 表演者来源：'camera' = 摄像头实时抠像；'file' = 一段（绿幕拍摄的）本地视频当演员
+  performerKind: 'camera',
+  performerPath: ''
+}
+
+/** 本地文件 → prmedia:// 地址（渲染层是 file:// 页面，直接给路径会被跨源拦） */
+function studioMediaUrl(p) {
+  return 'prmedia://local/?p=' + encodeURIComponent(String(p || ''))
+}
+
+/** 文件路径 → 短名字（面板/标题上显示） */
+function fileBaseName(p) {
+  return String(p || '').split(/[\\/]/).pop() || ''
 }
 
 const STUDIO_SLIDERS = [
@@ -2164,6 +2342,69 @@ const STUDIO_SLIDERS = [
 /** 演播室参数是全局默认：改了以后新开的演播室沿用 */
 function studioParams() {
   return { ...STUDIO_DEFAULTS, ...(loadPrefs().studio || {}) }
+}
+
+/**
+ * 切换演播室的"表演者"来源。
+ *  - camera：重新要一路摄像头（会先把视频文件停掉）
+ *  - file：停掉摄像头轨道，用一段本地视频当人像纹理（循环播放、静音）
+ */
+async function setStudioPerformer(t, kind, path) {
+  if (!t) return
+  const want = kind === 'file' ? 'file' : 'camera'
+  t.studioParams.performerKind = want
+  t.studioParams.performerPath = want === 'file' ? String(path || '') : ''
+  saveStudioParams(t.studioParams)
+  if (!t.studio) return
+  if (want === 'file') {
+    if (!t.studioParams.performerPath) {
+      showOverlay(t, '还没选视频文件', true)
+      return
+    }
+    // 摄像头轨道留着会一直亮灯 + 占带宽
+    try {
+      if (t.stream) for (const tr of t.stream.getTracks()) tr.stop()
+    } catch {}
+    t.stream = null
+    const ok = t.studio.setVideoUrl(studioMediaUrl(t.studioParams.performerPath))
+    if (!ok) {
+      showOverlay(t, t.fileName + '\n视频当表演者加载失败', true)
+      return
+    }
+    // 视频是录好的素材，默认不该镜像（镜像了画面里的字会反）——摄像头才需要镜像自拍效果
+    if (t.studioParams.mirror) {
+      t.studioParams.mirror = false
+      t.studio.setParams(t.studioParams)
+      saveStudioParams(t.studioParams)
+    }
+    hideOverlay(t)
+    t.titleEl.title = '虚拟演播室 · 表演者：' + fileBaseName(t.studioParams.performerPath)
+    statusEl.textContent = '演播室表演者 → 视频文件：' + fileBaseName(t.studioParams.performerPath)
+    statusEl.className = ''
+    return
+  }
+  // 切回摄像头
+  showOverlay(t, '正在打开摄像头…')
+  try {
+    const stream = await openStudioCamera(t.deviceId)
+    if (t.removed) {
+      for (const tr of stream.getTracks()) tr.stop()
+      return
+    }
+    try {
+      if (t.stream) for (const tr of t.stream.getTracks()) tr.stop()
+    } catch {}
+    t.stream = stream
+    t.studio.setStream(stream)
+    hideOverlay(t)
+    const v = stream.getVideoTracks()[0]
+    const s = (v && v.getSettings && v.getSettings()) || {}
+    t.titleEl.title = '虚拟演播室 · ' + ((v && v.label) || '') + (s.width ? ' · ' + s.width + '×' + s.height : '')
+    statusEl.textContent = '演播室表演者 → 摄像头'
+    statusEl.className = ''
+  } catch (err) {
+    showOverlay(t, t.fileName + '\n' + camErrorText(err), true)
+  }
 }
 
 let studioSaveTimer = null
@@ -2223,6 +2464,65 @@ function buildStudioPanel(t) {
   const panel = document.createElement('div')
   panel.className = 'studio-panel hidden'
   const params = t.studioParams
+
+  /*
+   * 表演者来源：摄像头（实时）或一段本地视频（绿幕拍摄的素材）。
+   * 两者都只是"人像纹理"的来源不同，抠像 / 机位 / 场景那套完全共用。
+   */
+  const perfRow = document.createElement('div')
+  perfRow.className = 'sp-row sp-perf'
+  const perfLabel = document.createElement('span')
+  perfLabel.className = 'sp-perf-label'
+  perfLabel.textContent = '表演者'
+  const camBtn = document.createElement('button')
+  camBtn.type = 'button'
+  camBtn.className = 'sp-perf-btn'
+  camBtn.textContent = '摄像头'
+  const fileBtn = document.createElement('button')
+  fileBtn.type = 'button'
+  fileBtn.className = 'sp-perf-btn'
+  fileBtn.textContent = '视频文件…'
+  const perfInfo = document.createElement('span')
+  perfInfo.className = 'sp-perf-info'
+
+  const syncPerf = () => {
+    const kind = params.performerKind === 'file' ? 'file' : 'camera'
+    camBtn.classList.toggle('on', kind === 'camera')
+    fileBtn.classList.toggle('on', kind === 'file')
+    perfInfo.textContent = kind === 'file' ? fileBaseName(params.performerPath) || '（没选文件）' : '实时摄像头'
+    perfInfo.title =
+      kind === 'file'
+        ? String(params.performerPath || '')
+        : '摄像头实时画面（绿幕前拍）→ 抠像后放进三维场景'
+  }
+  syncPerf()
+
+  camBtn.addEventListener('click', async (e) => {
+    e.stopPropagation()
+    await setStudioPerformer(t, 'camera')
+    syncPerf()
+  })
+  fileBtn.addEventListener('click', async (e) => {
+    e.stopPropagation()
+    let res = null
+    try {
+      res = await window.pr.pickLocalFiles('video')
+    } catch (err) {
+      statusEl.textContent = '选视频失败：' + ((err && err.message) || err)
+      statusEl.className = 'err'
+      return
+    }
+    const f = res && res.ok && Array.isArray(res.files) ? res.files.find((x) => x && x.path) : null
+    if (!f) return
+    await setStudioPerformer(t, 'file', f.path)
+    syncPerf()
+  })
+
+  perfRow.appendChild(perfLabel)
+  perfRow.appendChild(camBtn)
+  perfRow.appendChild(fileBtn)
+  perfRow.appendChild(perfInfo)
+  panel.appendChild(perfRow)
 
   // 场景
   const scenesRow = document.createElement('div')
@@ -2486,25 +2786,43 @@ async function addStudioTile(opts = {}) {
   layout()
 
   try {
-    const stream = await openStudioCamera(t.deviceId)
-    if (t.removed) {
-      for (const tr of stream.getTracks()) tr.stop()
-      return uid
+    // 表演者来源：默认摄像头；如果上次选了"视频文件"就先用视频（没摄像头也能开演播室）
+    const wantFile = t.studioParams.performerKind === 'file' && t.studioParams.performerPath
+    let stream = null
+    if (!wantFile) {
+      stream = await openStudioCamera(t.deviceId)
+      if (t.removed) {
+        for (const tr of stream.getTracks()) tr.stop()
+        return uid
+      }
+      t.stream = stream
     }
-    t.stream = stream
     const rt = new studioApi.StudioRuntime(canvas, {
       onError: (err) => console.warn('[studio] render error', err)
     })
     t.studio = rt
-    rt.setStream(stream)
+    if (wantFile) {
+      rt.setVideoUrl(studioMediaUrl(t.studioParams.performerPath))
+      // 视频素材默认不镜像（录好的画面镜像了字会反）
+      if (t.studioParams.mirror) {
+        t.studioParams.mirror = false
+        rt.setParams(t.studioParams)
+        saveStudioParams(t.studioParams)
+      }
+      hideOverlay(t)
+      titleEl.title = '虚拟演播室 · 表演者：' + fileBaseName(t.studioParams.performerPath)
+      if (nameEl) nameEl.textContent = label + ' · ' + fileBaseName(t.studioParams.performerPath).slice(0, 18)
+    } else {
+      rt.setStream(stream)
+      hideOverlay(t)
+      const v = stream.getVideoTracks()[0]
+      if (v) {
+        const s = v.getSettings ? v.getSettings() : {}
+        titleEl.title = '虚拟演播室 · ' + (v.label || '') + (s.width ? ' · ' + s.width + '×' + s.height : '')
+      }
+    }
     rt.setScene(t.studioParams.scene)
     rt.setParams(t.studioParams)
-    hideOverlay(t)
-    const v = stream.getVideoTracks()[0]
-    if (v) {
-      const s = v.getSettings ? v.getSettings() : {}
-      titleEl.title = '虚拟演播室 · ' + (v.label || '') + (s.width ? ' · ' + s.width + '×' + s.height : '')
-    }
   } catch (err) {
     showOverlay(t, label + '\n' + camErrorText(err), true)
   }
@@ -3273,6 +3591,7 @@ function addRoom(url, opts = {}) {
     showOverlay(t, '正在进入直播间…')
   })
   view.addEventListener('did-stop-loading', () => {
+    t.crashReload = false
     if (!t.failed) hideOverlay(t)
   })
   view.addEventListener('did-fail-load', (e) => {
@@ -3282,6 +3601,11 @@ function addRoom(url, opts = {}) {
     showOverlay(t, `加载失败（${e.errorCode} ${e.errorDescription || ''}）\n${e.validatedURL || url}`, true)
   })
   view.addEventListener('render-process-gone', (e) => {
+    if (t.crashReload) {
+      // 我们自己故意崩掉的（页面主线程卡死时只能换一个新渲染进程，reload 是排不进队）
+      showOverlay(t, '页面卡死了，正在换一个新进程重开…')
+      return
+    }
     t.failed = true
     showOverlay(t, `渲染进程退出（${e.reason || 'unknown'}），点 ⟳ 重新加载`, true)
   })
@@ -3366,6 +3690,14 @@ function reloadRoom(uid) {
   if (!t) return
   t.failed = false
   if (t.studio) {
+    // 视频文件当表演者：重新拉一遍文件；摄像头：重开一路流
+    if (t.studioParams.performerKind === 'file' && t.studioParams.performerPath) {
+      showOverlay(t, '正在重新加载表演者视频…')
+      const ok = t.studio.setVideoUrl(studioMediaUrl(t.studioParams.performerPath))
+      if (ok) hideOverlay(t)
+      else showOverlay(t, t.fileName + '\n表演者视频加载失败', true)
+      return
+    }
     showOverlay(t, '正在重开摄像头…')
     openStudioCamera(t.deviceId)
       .then((stream) => {
@@ -3398,6 +3730,13 @@ function reloadRoom(uid) {
     return
   }
   showOverlay(t, '正在重新加载…')
+  // 手动/自动重载都把"卡住计数"清干净，让 watchdog 重新开始判
+  t.pokeAt = 0
+  t.stuckSince = 0
+  t.stuckShown = false
+  t.frozenSince = 0
+  t.frozenShown = false
+  t.pokes = 0
   try {
     t.view.reload()
   } catch {
@@ -3936,6 +4275,12 @@ function renderRecUi() {
   } else if (recState.lastFile) {
     statusEl.textContent = '已保存：' + recState.lastFile.split(/[\\/]/).pop()
     statusEl.className = 'ok'
+  } else if (recentRecFail()) {
+    // 失败原因要留在状态栏上（以前 renderRecUi 的 else 会立刻把它擦掉，
+    // 用户只看到按钮变成「✕ 重试」，完全不知道错在哪）
+    const f = recentRecFail()
+    statusEl.textContent = f.msg
+    statusEl.className = 'err'
   } else {
     statusEl.textContent = ''
     statusEl.className = ''
@@ -3951,10 +4296,23 @@ const recStarting = new Set()
  * 录制的失败反馈：状态栏写原因 + 瓦片闪一下 + 按钮变成「✕ 重试」。
  * 以前只写状态栏，看着就像"点了没反应"。
  */
+/** 最近 60 秒内的录制失败原因（状态栏用它把原因留住） */
+function recentRecFail() {
+  const now = Date.now()
+  let best = null
+  for (const [, t] of tiles) {
+    if (!t || !t.recFailMsg) continue
+    if (t.recFailAt && now - t.recFailAt > 60 * 1000) continue
+    if (!best || (t.recFailAt || 0) > (best.at || 0)) best = { msg: t.recFailMsg, at: t.recFailAt || 0 }
+  }
+  return best
+}
+
 function recFail(t, msg) {
   const text = String(msg || '录制启动失败')
   if (t) {
     t.recFailMsg = text
+    t.recFailAt = Date.now()
     try {
       t.el.classList.remove('flash')
       // 重启动画：先移除再加回来
@@ -4002,6 +4360,32 @@ async function toggleRecord(uid) {
   } finally {
     recStarting.delete(uid)
     renderRecUi()
+  }
+}
+
+/**
+ * 抓不到流时，先问一句页面自己怎么说的（已下播 / 未开播 / 账号在别处）。
+ * 这一句能直接回答"是哪里出错了"，比只写"再点重试"有用得多。
+ */
+async function tileOfflineReason(t) {
+  try {
+    if (!t || !t.view) return ''
+    const r = await Promise.race([
+      t.view.executeJavaScript(
+        `(() => {
+           const txt = (document.body && document.body.innerText) || ''
+           const m = txt.match(/直播已结束|主播已下播|已下播|未开播|暂未开播|直播间不存在|账号已在其他地方进入直播间/)
+           return m ? m[0] : ''
+         })()`,
+        true
+      ),
+      new Promise((res) => setTimeout(() => res('__timeout__'), 3000))
+    ])
+    // 页面主线程卡死（重/已结束的抖音房间很常见）时 executeJavaScript 是不返回的
+    if (r === '__timeout__') return '页面卡住/主线程没响应'
+    return String(r || '')
+  } catch {
+    return '页面读不出内容'
   }
 }
 
@@ -4091,6 +4475,27 @@ async function toggleRecordInner(uid, t) {
   } catch {}
 
   /**
+   * 抓到的流地址可能"过期"：抖音的 flv 地址带 wsSecret + keeptime，
+   * 页面停止请求（暂停 / 被别处顶掉 / 开了很久）之后我们手里那条就只能拿到 403。
+   * 之前只按"有没有地址"判断，于是拿一条 5 分钟前的旧地址去录 → ffmpeg 立刻 403
+   * → 放弃 → 按钮回到「✕ 重试」，用户连点几次都是一样的失败（rec.log 里就是这样：
+   * `stream url failed … 403/无数据` 然后 `wrote nothing this attempt, give up`）。
+   * 现在地址超过 60 秒就直接重载页面，等它重新发一次请求。
+   */
+  const STALE_URL_MS = 60 * 1000
+  if (mode === 'stream' && Number.isFinite(urlAgeMs) && urlAgeMs > STALE_URL_MS) {
+    statusEl.textContent = `抓到的流地址已经 ${Math.round(urlAgeMs / 1000)} 秒没更新，重载页面重新抓一次…`
+    statusEl.className = 'warn'
+    t.recAutoReloaded = true // 这一轮已经手动重载过了，别再触发"自动重载一次"
+    try {
+      t.view.reload()
+    } catch {}
+    mode = 'screen'
+    urlAgeMs = null
+    await new Promise((res) => setTimeout(res, 1500))
+  }
+
+  /**
    * 什么时候只能屏幕录制：
    *  - other（优酷这类点播）：播放器自己的 MSE 一片片拉 .ts，页面里没有 .flv/.m3u8；
    *  - douyu 且**没取到移动站 HLS 地址**：页面里那条 flv 跟页面会话绑定（实测 ffmpeg 复用只给
@@ -4160,12 +4565,20 @@ async function toggleRecordInner(uid, t) {
       }
       if (mode !== 'stream') {
         const why = urlAgeMs == null ? '重载后仍然抓不到这个房间的直播流地址' : '抓到的流地址已经过期'
-        recFail(t, `${why}：这个房间可能刚开播/刚断线，等画面出来后再点「✕ 重试」`)
+        const hint = await tileOfflineReason(t)
+        recFail(
+          t,
+          `${why}${hint ? `（页面显示「${hint}」）` : ''}：这个房间可能刚开播/刚断线，等画面出来后再点「✕ 重试」；具体原因看「调试」页第 5 节日志（红灯行）`
+        )
         return
       }
     } else {
       const why = urlAgeMs == null ? '还没抓到这个房间的直播流地址' : '抓到的流地址已经过期'
-      recFail(t, `${why}：先点这个瓦片的「⟳」重载房间，等画面出来再点「✕ 重试」（不会退化成屏幕录制）`)
+      const hint = await tileOfflineReason(t)
+      recFail(
+        t,
+        `${why}${hint ? `（页面显示「${hint}」）` : ''}：先点这个瓦片的「⟳」重载房间，等画面出来再点「✕ 重试」（不会退化成屏幕录制）；原因看「调试」页日志面板`
+      )
       return
     }
   }
@@ -10621,6 +11034,12 @@ const dbgLifeEl = document.getElementById('dbg-life')
 const dbgProcsEl = document.getElementById('dbg-procs')
 const dbgSummaryEl = document.getElementById('dbg-summary')
 const dbgAutoEl = document.getElementById('dbg-auto')
+const dbgLogsEl = document.getElementById('dbg-logs')
+const dbgLogErrorsEl = document.getElementById('dbg-log-errors')
+/** 日志面板：rec.log / main.log 尾巴 + 级别（error 红 / warn 黄） */
+let dbgLogs = null
+/** 日志面板自动滚到底（用户自己往上翻时不抢） */
+let dbgLogStick = true
 let dbgTimer = null
 let dbgBusy = false
 let dbgLastSnap = null
@@ -10860,12 +11279,82 @@ function dbgRenderTiles(rows, bwSnap) {
       ? `<p class="dbg-note">全部瓦片带宽合计：当前 <b>${bwTotal.nowKbps} KB/s</b>（≈ ${bwTotal.nowMbps} Mbps）· 平均 ${bwTotal.avgKbps} KB/s（≈ ${bwTotal.avgMbps} Mbps）· 统计窗口 ${Math.round(
           ((bwSnap.rows || []).reduce((m, r) => Math.max(m, r.windowSec || 0), 0))
         )} 秒（本地 CDP 字节计数，不含录制进程单独拉流）</p>`
-      : '')
+      : '') +
+    (() => {
+      // 卡顿一眼可见：谁的主线程没应答（页面卡住）、谁的画面停住（缓冲/断流）
+      const bad = []
+      const now = Date.now()
+      for (const [uid, t] of tiles) {
+        if (t.local || t.camera || t.studio || t.stage) continue
+        const name = roomLabel(t.url)
+        if (t.pokeAt && now - t.pokeAt > STUCK_JS_MS) {
+          bad.push(`${name} 页面没响应 ${Math.round((now - t.pokeAt) / 1000)} 秒`)
+        } else if (t.frozenSince) {
+          bad.push(`${name} 画面停住 ${Math.round((now - t.frozenSince) / 1000)} 秒`)
+        } else if (t.autoReloadCount) {
+          bad.push(`${name} 已自动重载 ${t.autoReloadCount} 次`)
+        }
+        void uid
+      }
+      return bad.length ? `<p class="dbg-note"><b class="bad">⚠ 卡顿</b>：${bad.map(dbgEsc).join(' · ')}</p>` : ''
+    })()
+}
+
+/** 日志行的时间列：本地时间；不是今天的行前面补「月-日」（跨天的老日志一眼能分出来） */
+function dbgLogTime(r) {
+  const t = String((r && r.t) || '')
+  if (!t) return ''
+  const day = r.isToday === false && r.day ? `${r.day} ` : ''
+  return day + t
+}
+
+/** 渲染日志面板：每行按级别上色，error 行加 ERR 标签；「只看错误」时只留 error/warn */
+function dbgRenderLogs(payload) {
+  if (!dbgLogsEl) return
+  const onlyErr = Boolean(dbgLogErrorsEl && dbgLogErrorsEl.checked)
+  const files = (payload && payload.files) || []
+  const counts = (payload && payload.counts) || { error: 0, warn: 0, info: 0 }
+  if (!files.length) {
+    dbgLogsEl.innerHTML = '<p class="dbg-empty">没有日志文件</p>'
+    return
+  }
+  const blocks = files.map((f) => {
+    const all = f.lines || []
+    const rows = onlyErr ? all.filter((r) => r.level === 'error' || r.level === 'warn') : all
+    const head =
+      `<div class="dbg-log-head">${dbgEsc(f.label)} ` +
+      `<span class="dbg-sub">${f.exists ? f.sizeKb + ' KB' : '文件不存在'} · ${dbgEsc(f.path)}</span></div>`
+    if (!rows.length) {
+      const why = !f.exists ? '（没有这个日志文件）' : onlyErr ? '（没有错误 / 警告）' : '（空）'
+      return head + `<p class="dbg-empty">${why}</p>`
+    }
+    const body = rows
+      .map((r) => {
+        const tag =
+          r.level === 'error'
+            ? '<b class="log-err-tag">ERR</b>'
+            : r.level === 'warn'
+              ? '<b class="log-warn-tag">WARN</b>'
+              : '<b class="log-info-tag">·</b>'
+        const when = dbgLogTime(r)
+        const tip = r.utc ? `日志原文（UTC）：${r.utc}` : ''
+        return `<div class="dbg-log-row lv-${r.level}"${tip ? ` title="${dbgEsc(tip)}"` : ''}>${tag}<span class="dbg-log-t">${dbgEsc(when)}</span><span class="dbg-log-x">${dbgEsc(r.text)}</span></div>`
+      })
+      .join('')
+    return head + `<div class="dbg-log-body">${body}</div>`
+  })
+  const readLines = (files[0] && files[0].lines && files[0].lines.length) || 0
+  dbgLogsEl.innerHTML =
+    `<p class="dbg-note">合计：<b class="log-err-tag">ERR ${counts.error}</b> · ` +
+    `<b class="log-warn-tag">WARN ${counts.warn}</b> · 普通 ${counts.info}（最近 ${readLines} 行 · 时间为本地时间）</p>` +
+    blocks.join('')
+  if (dbgLogStick) {
+    for (const el of dbgLogsEl.querySelectorAll('.dbg-log-body')) el.scrollTop = el.scrollHeight
+  }
 }
 
 /** webContents 的角色 → 中文标签（决定表格里怎么显示、要不要高亮） */
-const DBG_ROLE = {
-  main: { text: '主窗口', mon: false },
+const DBG_ROLE = {  main: { text: '主窗口', mon: false },
   tile: { text: '观看瓦片', mon: false },
   probe: { text: '监控探测窗', mon: true },
   'probe-follow': { text: '关注列表探测窗', mon: true },
@@ -11025,6 +11514,13 @@ async function refreshDebug() {
     dbgRenderContents(snap.contents, snap.mainWebContentsId)
     dbgRenderLifecycle(snap.lifecycle, snap.mainWebContentsId)
     dbgRenderSide(snap)
+    // 日志面板：读一次日志尾巴（错误行标红、警告标黄）
+    try {
+      dbgLogs = await window.pr.debugLogs({ lines: 120 })
+      dbgRenderLogs(dbgLogs)
+    } catch (err) {
+      if (dbgLogsEl) dbgLogsEl.innerHTML = `<p class="dbg-empty">读日志失败：${dbgEsc(String((err && err.message) || err))}</p>`
+    }
   } finally {
     dbgBusy = false
   }
@@ -11066,6 +11562,18 @@ function stopDebugLoop() {
 
 if (dbgTilesEl) {
   document.getElementById('dbg-refresh').addEventListener('click', () => refreshDebug())
+  // 日志面板：「只看错误」勾了就地重绘（不用等下一轮刷新）
+  if (dbgLogErrorsEl) {
+    dbgLogErrorsEl.addEventListener('change', () => dbgRenderLogs(dbgLogs))
+  }
+  // 用户自己往上翻日志时别再自动滚到底
+  if (dbgLogsEl) {
+    dbgLogsEl.addEventListener('scroll', () => {
+      const box = dbgLogsEl.querySelector('.dbg-log-body')
+      if (!box) return
+      dbgLogStick = box.scrollHeight - box.scrollTop - box.clientHeight < 40
+    }, true)
+  }
   // 「释放」按钮用事件委托：两张表都是整块重绘的，逐个挂监听会漏
   const onReleaseClick = (e) => {
     const btn = e.target && e.target.closest ? e.target.closest('.dbg-btn') : null

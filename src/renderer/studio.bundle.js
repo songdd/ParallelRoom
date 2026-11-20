@@ -28160,6 +28160,8 @@ void main() {
       this.scene = null;
       this.rafId = 0;
       this.stream = null;
+      this.sourceKind = "none";
+      this.sourcePath = "";
       this.video = document.createElement("video");
       this.video.muted = true;
       this.video.playsInline = true;
@@ -28236,8 +28238,18 @@ void main() {
     setStream(stream) {
       this.stream = stream || null;
       const old = this.tex;
+      if (this.stream) {
+        try {
+          this.video.pause();
+          this.video.removeAttribute("src");
+          this.video.load();
+        } catch {
+        }
+      }
       this.video.srcObject = this.stream;
       if (this.stream) {
+        this.sourceKind = "camera";
+        this.sourcePath = "";
         this.video.play().catch(() => {
         });
         const t = new VideoTexture(this.video);
@@ -28251,6 +28263,65 @@ void main() {
         this.personUniforms.uTex.value = null;
       }
       if (old && old.dispose) old.dispose();
+    }
+    /**
+     * 用一段本地视频当"表演者"（绿幕拍摄的素材）。
+     *
+     * 抠像、机位、机位预设、场景那些逻辑全都不用改：这条路只是把"人像纹理"的来源
+     * 从 MediaStream 换成 <video src>，剩下的都走同一个 VideoTexture + 同一个抠像 shader。
+     * 视频用 prmedia:// 协议喂进来（渲染层是 file:// 页面，直接给本地路径会被跨源拦）。
+     *
+     * @param {string} url   prmedia://local/?p=<encoded path>
+     * @param {{volume?:number, mirror?:boolean}} [opts]
+     */
+    setVideoUrl(url, opts = {}) {
+      if (!url) return false;
+      try {
+        if (this.stream) {
+          for (const tr of this.stream.getTracks()) tr.stop();
+        }
+        this.stream = null;
+        if (this.video.srcObject) this.video.srcObject = null;
+      } catch {
+      }
+      const v = this.video;
+      const old = this.tex;
+      try {
+        v.loop = true;
+        v.muted = true;
+        v.playsInline = true;
+        v.crossOrigin = "anonymous";
+        v.setAttribute("src", url);
+        v.load();
+        v.play().catch(() => {
+        });
+      } catch (err) {
+        if (this.opts.onError) this.opts.onError(err);
+        return false;
+      }
+      const t = new VideoTexture(v);
+      t.minFilter = LinearFilter;
+      t.magFilter = LinearFilter;
+      t.colorSpace = SRGBColorSpace;
+      this.tex = t;
+      this.personUniforms.uTex.value = t;
+      if (old && old.dispose) old.dispose();
+      this.sourceKind = "file";
+      this.sourcePath = url;
+      return true;
+    }
+    /** 当前表演者是谁（摄像头 / 视频文件）—— 调试和面板显示用 */
+    sourceInfo() {
+      return {
+        kind: this.sourceKind || (this.stream ? "camera" : "none"),
+        path: this.sourcePath || "",
+        width: this.video.videoWidth || 0,
+        height: this.video.videoHeight || 0,
+        readyState: this.video.readyState,
+        paused: this.video.paused,
+        loop: this.video.loop,
+        hasTexture: Boolean(this.personUniforms.uTex.value)
+      };
     }
     /** 改参数（键色、容差、机位……），即时生效 */
     setParams(patch = {}) {
@@ -28361,7 +28432,9 @@ void main() {
       } catch {
       }
       try {
+        this.video.pause();
         this.video.srcObject = null;
+        this.video.removeAttribute("src");
       } catch {
       }
       if (this.tex && this.tex.dispose) this.tex.dispose();

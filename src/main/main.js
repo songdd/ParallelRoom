@@ -129,18 +129,38 @@ const LOG_FILE = (() => {
   }
 })()
 
+// 管道被关掉（比如 `app.exe *> log` 的父进程先退了）时 stdout 会抛 EPIPE。
+// 这个 error 事件不管的话会变成 uncaughtException → 又进 log() → 又写 stdout → EPIPE…
+// 实测能刷到上百万行、把日志文件写爆，所以这里先把 stdout/stderr 的 error 吞掉。
+process.stdout.on('error', () => {})
+process.stderr.on('error', () => {})
+
+/** 正在写日志（防止 log 自己触发异常又被 log 递归调用） */
+let logBusy = false
+
 function log(...args) {
-  if (!LOG_FILE) return
-  const line = `[${new Date().toISOString()}] ${args
-    .map((a) => (typeof a === 'string' ? a : JSON.stringify(a)))
-    .join(' ')}\n`
+  if (!LOG_FILE || logBusy) return
+  logBusy = true
   try {
-    fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true })
-    fs.appendFileSync(LOG_FILE, line)
-  } catch {
-    // ignore
+    const line = `[${new Date().toISOString()}] ${args
+      .map((a) => (typeof a === 'string' ? a : JSON.stringify(a)))
+      .join(' ')}\n`
+    try {
+      fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true })
+      fs.appendFileSync(LOG_FILE, line)
+    } catch {
+      // ignore
+    }
+    if (process.env.PR_LOG) {
+      try {
+        process.stdout.write(line)
+      } catch {
+        // EPIPE：终端/管道没了，落盘已经有了，不再往外写
+      }
+    }
+  } finally {
+    logBusy = false
   }
-  if (process.env.PR_LOG) process.stdout.write(line)
 }
 
 process.on('uncaughtException', (err) => log('uncaughtException', err && (err.stack || err.message)))
@@ -1975,6 +1995,8 @@ function registerIpc() {
 
   // 调试页：资源快照 / 保存快照 / 手工释放某个页面
   ipcMain.handle('debug:snapshot', () => debugSnapshot())
+  // 调试页的日志面板：读 rec.log / main.log 的尾巴，逐行判级别（error / warn）
+  ipcMain.handle('debug:logs', (event, opts) => readLogTails(opts || {}))
   ipcMain.handle('debug:save', (event, payload) => saveDebugSnapshot(payload))
   ipcMain.handle('debug:release', (event, webContentsId) => {
     const id = Number(webContentsId)
@@ -2121,6 +2143,49 @@ function registerIpc() {
   // 渲染层同步"精彩片段小窗开没开"：开着才在主进程拦 [ ] 两个键
   ipcMain.on('ui:clips-win-state', (event, open) => {
     clipsWinOpen = !!open
+  })
+
+  // 渲染层往 rec.log 里记一笔（瓦片卡住 / 自动重载这类只有界面知道的事），
+  // 格式跟录制模块一致，调试页第 5 节的日志面板能直接看到
+  ipcMain.handle('ui:log', (event, kind, msg) => {
+    const line = `[${new Date().toISOString()}] ${String(kind || 'ui')} ${String(msg || '')}\n`
+    try {
+      const p = path.join(app.getPath('userData'), 'rec.log')
+      fs.mkdirSync(path.dirname(p), { recursive: true })
+      fs.appendFileSync(p, line)
+      return { ok: true, line: line.trim() }
+    } catch (err) {
+      return { ok: false, error: (err && err.message) || String(err) }
+    }
+  })
+
+  // 瓦片页面主线程卡死时：reload 是排不进队的（渲染进程自己在死循环里），
+  // 只能把这个渲染进程崩掉 → 新进程里重载。等于给这一格换一个干净进程重开。
+  ipcMain.handle('tile:hard-reload', async (event, webContentsId) => {
+    const id = Number(webContentsId)
+    const wc = id > 0 ? webContents.fromId(id) : null
+    if (!wc || wc.isDestroyed()) return { ok: false, error: '这个页面已经不在了' }
+    const url = (() => {
+      try {
+        return wc.getURL()
+      } catch {
+        return ''
+      }
+    })()
+    log('tile hard reload', id, url)
+    try {
+      wc.forcefullyCrashRenderer()
+    } catch (err) {
+      return { ok: false, error: '崩不掉这个渲染进程：' + ((err && err.message) || err) }
+    }
+    // 等崩溃回调落地再重载，否则 reload 可能又排进那个已经死掉的主线程
+    await new Promise((r) => setTimeout(r, 700))
+    try {
+      if (!wc.isDestroyed()) wc.reload()
+      return { ok: true, mode: 'crash+reload', url }
+    } catch (err) {
+      return { ok: false, error: '重载失败：' + ((err && err.message) || err) }
+    }
   })
 
   ipcMain.handle('rec:mode', (event, webContentsId) => {
@@ -2746,6 +2811,90 @@ function saveDebugSnapshot(payload) {
   } catch (err) {
     return { ok: false, error: (err && err.message) || String(err) }
   }
+}
+
+/* ------------------- 调试页 · 日志面板（读日志尾巴 + 判级别） ------------------- */
+/*
+ * 归到"错误"的关键词（用户看到的红行）：录制失败 / 取流失败 / 403 / 断流 / 放弃 / 超时…
+ * 归到"警告"的（黄行）：重试 / 换线路 / 跳过 / 未确认 / 降级 / 冷却…
+ * 其余算普通行。判定只按关键词，不猜语义——宁可少标，也不要把正常的行刷成红色。
+ */
+const LOG_ERROR_RE =
+  /(\berror\b|\bfailed\b|\bfail\b|refused|forbidden|\b40[13]\b|econnreset|etimedout|\btimeout\b|give up|too small|not seekable|exited unexpectedly|wrote nothing|no stream|stream broke|invalid data|conversion failed|e?inval|crash|uncaught|exception|拒绝|失败|超时|无数据|放弃|断流|崩溃|异常)/i
+const LOG_WARN_RE =
+  /(\bretry\b|resume|trying alternate|skip|skipped|fallback|unconfirmed|blocked|cooldown|dropping|降级|重试|换线|跳过|未确认|被拦截|冷却)/i
+
+/* 日志里的时间戳是 new Date().toISOString() 写的，也就是 UTC（比北京时间早 8 小时）。
+ * 面板是给人看的，所以在主进程就换成系统本地时间；跨天的行额外带上「月-日」。
+ * 例：2026-11-20T12:27:13.833Z（UTC）→ t="20:27:13"、day="11-20"、utc=原文 */
+function logTimeParts(raw) {
+  const s = String(raw || '').trim()
+  const out = { t: '', day: '', isToday: true, utc: s }
+  if (!s) return out
+  // 已经是纯时间（老格式 / 手写的日志），原样用
+  if (/^\d{2}:\d{2}:\d{2}/.test(s) && !/^\d{4}-/.test(s)) {
+    out.t = s.slice(0, 8)
+    return out
+  }
+  const d = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}/.test(s) ? new Date(s) : null
+  if (!d || Number.isNaN(d.getTime())) {
+    out.t = s.slice(0, 19)
+    return out
+  }
+  const z = (x) => String(x).padStart(2, '0')
+  out.t = `${z(d.getHours())}:${z(d.getMinutes())}:${z(d.getSeconds())}`
+  out.day = `${z(d.getMonth() + 1)}-${z(d.getDate())}`
+  const now = new Date()
+  out.isToday =
+    d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()
+  return out
+}
+
+/**
+ * @param {{lines?:number}} opts
+ * @returns {{ok:boolean, at:number, files:Array<{key:string,label:string,path:string,exists:boolean,sizeKb:number,lines:Array<{t:string,day:string,isToday:boolean,utc:string,level:string,text:string}>}>, counts:{error:number,warn:number,info:number}}}
+ */
+function readLogTails(opts = {}) {
+  const n = Math.max(20, Math.min(500, Math.floor(Number(opts.lines) || 120)))
+  const files = []
+  const counts = { error: 0, warn: 0, info: 0 }
+  const targets = [
+    { key: 'rec', label: '录制日志', path: path.join(app.getPath('userData'), 'rec.log') },
+    { key: 'main', label: '主进程日志', path: LOG_FILE || path.join(app.getPath('userData'), 'main.log') }
+  ]
+  for (const t of targets) {
+    const row = { key: t.key, label: t.label, path: t.path, exists: false, sizeKb: 0, lines: [] }
+    try {
+      if (fs.existsSync(t.path)) {
+        row.exists = true
+        const stat = fs.statSync(t.path)
+        row.sizeKb = Math.round((stat.size / 1024) * 10) / 10
+        const text = fs.readFileSync(t.path, 'utf8').replace(/^\uFEFF/, '')
+        const all = text.split(/\r?\n/).filter(Boolean)
+        for (const raw of all.slice(-n)) {
+          let level = 'info'
+          if (LOG_ERROR_RE.test(raw)) level = 'error'
+          else if (LOG_WARN_RE.test(raw)) level = 'warn'
+          if (counts[level] !== undefined) counts[level] += 1
+          // 时间戳单独拆出来，方便对齐看（文件里是 UTC，这里换成本地时间）
+          const m = raw.match(/^\[([^\]]+)\]\s*(.*)$/)
+          const ts = logTimeParts(m ? m[1] : '')
+          row.lines.push({
+            t: ts.t,
+            day: ts.day,
+            isToday: ts.isToday,
+            utc: ts.utc,
+            level,
+            text: (m ? m[2] : raw).slice(0, 400)
+          })
+        }
+      }
+    } catch (err) {
+      row.error = err && err.message
+    }
+    files.push(row)
+  }
+  return { ok: true, at: Date.now(), files, counts }
 }
 
 /* ------------------- 诊断：账号是否被"别处已进入"拦住 ------------------- */
