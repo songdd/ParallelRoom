@@ -1,9 +1,12 @@
 {
   "name": "parallel-room",
   "productName": "ParallelRoom",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "同一抖音账号并行进入多个直播间的桌面工具（Electron + 多 webview）",
+  "author": {
+    "name": "ParallelRoom"
+  },
   "main": "src/main/main.js",
   "scripts": {
     "start": "electron .",
@@ -13,17 +16,28 @@
     "shortcut": "powershell -ExecutionPolicy Bypass -File ./make-shortcut.ps1",
     "shortcut:remove": "powershell -ExecutionPolicy Bypass -File ./make-shortcut.ps1 -Remove",
     "pack": "electron-builder --win dir --x64",
-    "dist": "electron-builder --win nsis --x64"
+    "dist": "electron-builder --win nsis zip --x64",
+    "dist:nsis": "electron-builder --win nsis --x64",
+    "dist:zip": "electron-builder --win zip --x64",
+    "build:studio": "esbuild src/renderer/studio.js --bundle --format=iife --target=chrome120 --outfile=src/renderer/studio.bundle.js",
+    "build:stage": "esbuild src/renderer/stage.js --bundle --format=iife --target=chrome120 --outfile=src/renderer/stage.bundle.js",
+    "build:render": "npm run build:studio && npm run build:stage",
+    "icon": "node scripts/make-ico.js build/icon.png build/icon.ico"
   },
   "devDependencies": {
     "electron": "45.1.0",
-    "electron-builder": "^26.18.0"
+    "electron-builder": "^26.18.0",
+    "esbuild": "^0.28.2",
+    "three": "^0.187.0",
+    "@pixiv/three-vrm": "^3.5.5"
   },
   "build": {
     "appId": "com.parallelroom.app",
     "productName": "ParallelRoom",
+    "copyright": "ParallelRoom",
     "directories": {
-      "output": "dist"
+      "output": "dist",
+      "buildResources": "build"
     },
     "files": [
       "src/**/*",
@@ -32,16 +46,34 @@
       "!**/.tmp/**"
     ],
     "asar": true,
+    "extraResources": [
+      {
+        "from": "vendor/ffmpeg",
+        "to": "ffmpeg",
+        "filter": [
+          "ffmpeg.exe",
+          "ffprobe.exe",
+          "README.md"
+        ]
+      }
+    ],
     "win": {
+      "icon": "build/icon.ico",
       "target": [
         {
           "target": "nsis",
           "arch": [
             "x64"
           ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
         }
       ],
-      "artifactName": "ParallelRoom-Setup-${version}.${ext}"
+      "artifactName": "ParallelRoom-${version}-portable-win-${arch}.${ext}"
     },
     "nsis": {
       "oneClick": false,
@@ -49,7 +81,10 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "ParallelRoom"
+      "shortcutName": "ParallelRoom",
+      "deleteAppDataOnUninstall": false,
+      "uninstallDisplayName": "ParallelRoom",
+      "artifactName": "ParallelRoom-Setup-${version}.${ext}"
     }
   }
 }

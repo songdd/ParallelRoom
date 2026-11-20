@@ -42,6 +42,18 @@ const UA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 
 function findFfmpeg() {
   if (process.env.PR_FFMPEG && fs.existsSync(process.env.PR_FFMPEG)) return process.env.PR_FFMPEG
+  // 安装版：工具随包放在 resources\ffmpeg\ 里（electron-builder 的 extraResources）；
+  // 开发态 / 绿色版：项目里的 vendor\ffmpeg\
+  const bundled = []
+  try {
+    if (process.resourcesPath) bundled.push(path.join(process.resourcesPath, 'ffmpeg', 'ffmpeg.exe'))
+  } catch {}
+  bundled.push(path.join(__dirname, '..', '..', 'vendor', 'ffmpeg', 'ffmpeg.exe'))
+  for (const c of bundled) {
+    try {
+      if (fs.existsSync(c)) return c
+    } catch {}
+  }
   for (const dir of String(process.env.PATH || '').split(path.delimiter)) {
     if (!dir) continue
     const candidate = path.join(dir, 'ffmpeg.exe')
@@ -58,11 +70,27 @@ function findFfmpeg() {
 }
 
 /**
- * 默认录制目录 = 项目目录下的 output。
- * 开发态 app.getAppPath() 就是 D:\code\ParallelRoom，打包后可能指到 asar，
- * 所以再兜一层 exe 所在目录，保证"忘了配也能落到项目旁边"。
+ * 默认录制目录。
+ * - 开发态（源码跑）：项目目录下的 output；
+ * - 安装版：**绝不能落在安装目录里**（升级/卸载会把录制清掉），改用「视频」库下的 ParallelRoom
+ *   （`%USERPROFILE%\Videos\ParallelRoom`），取不到就退 userData\recordings。
  */
 function DEFAULT_OUT_DIR() {
+  const packaged = (() => {
+    try {
+      return app.isPackaged || String(app.getAppPath()).includes('app.asar')
+    } catch {
+      return true
+    }
+  })()
+  if (packaged) {
+    try {
+      return path.join(app.getPath('videos'), 'ParallelRoom')
+    } catch {}
+    try {
+      return path.join(app.getPath('userData'), 'recordings')
+    } catch {}
+  }
   const candidates = []
   try {
     candidates.push(path.join(app.getAppPath(), 'output'))
@@ -233,6 +261,121 @@ class RecorderManager {
       child.on('close', () => {
         const m = out.trim().match(/^(\d+),(\d+)/)
         resolve(m ? { width: Number(m[1]), height: Number(m[2]) } : null)
+      })
+    })
+  }
+
+  /** 量视频时长（导出拼接时用来算进度百分比） */
+  probeDuration(file) {
+    return new Promise((resolve) => {
+      if (!this.ffprobe) return resolve(null)
+      const child = spawn(
+        this.ffprobe,
+        ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', file],
+        { windowsHide: true }
+      )
+      let out = ''
+      child.stdout.on('data', (d) => {
+        out += d.toString()
+      })
+      child.on('error', () => resolve(null))
+      child.on('close', () => {
+        const v = Number(String(out).trim())
+        resolve(Number.isFinite(v) && v > 0 ? v : null)
+      })
+    })
+  }
+
+  /**
+   * 找 `t` 之前（含）最近的关键帧时间。
+   *
+   * 为什么需要它：`-c copy` 只能从关键帧开始切，切点会往前漂一个 GOP。
+   * 对"取最近 N 秒"来说这很致命——片段末尾会少掉漂掉的那几秒，正好是要看的画面。
+   * 这里量出漂移量，再用 `-t (N + 漂移)` 把尾巴补回来，保证结束点仍然是"现在"。
+   */
+  lastKeyframeBefore(file, t) {
+    return new Promise((resolve) => {
+      if (!this.ffprobe || !(t > 0)) return resolve(null)
+      const from = Math.max(0, t - 6)
+      const child = spawn(
+        this.ffprobe,
+        [
+          '-v',
+          'error',
+          '-select_streams',
+          'v:0',
+          '-read_intervals',
+          `${from.toFixed(3)}%+${(t - from + 0.5).toFixed(3)}`,
+          '-show_entries',
+          'frame=key_frame,pts_time',
+          '-of',
+          'csv=p=0',
+          file
+        ],
+        { windowsHide: true }
+      )
+      let out = ''
+      child.stdout.on('data', (d) => {
+        out += d.toString()
+      })
+      child.on('error', () => resolve(null))
+      child.on('close', () => {
+        let best = null
+        for (const line of out.split(/\r?\n/)) {
+          const parts = line.trim().split(',')
+          if (parts.length < 2) continue
+          const ts = Number(parts[parts.length - 1])
+          const kf = Number(parts[0])
+          if (!Number.isFinite(ts) || kf !== 1) continue
+          if (ts <= t + 0.001 && (best === null || ts > best)) best = ts
+        }
+        resolve(best)
+      })
+    })
+  }
+
+  /**
+   * 量时长（宽松版）：给"正在写的分段"用。
+   *
+   * 坑：ffmpeg 还在往 matroska 里写的时候，文件没有 Duration 元素，ffprobe 的
+   * `format=duration` 直接返回 `N/A`（stderr 是 "File ended prematurely"）。
+   * 边看边截如果只看那个值，就会一直报"还没写出可读的分段"——实测踩到过。
+   * 这里退一步去读**最后一个视频包的 pts**，20 秒的分段只要 60ms 左右。
+   */
+  probeDurationLoose(file) {
+    return this.probeDuration(file).then((d) => {
+      if (Number.isFinite(d) && d > 0) return d
+      return new Promise((resolve) => {
+        if (!this.ffprobe) return resolve(null)
+        const child = spawn(
+          this.ffprobe,
+          ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'packet=pts_time', '-of', 'csv=p=0', file],
+          { windowsHide: true }
+        )
+        let buf = ''
+        let maxPts = -1
+        let secondMax = -1
+        const eat = (s) => {
+          const lines = s.split(/\r?\n/)
+          buf = lines.pop() || ''
+          for (const line of lines) {
+            const v = Number(line.trim())
+            if (!Number.isFinite(v)) continue
+            if (v > maxPts) {
+              secondMax = maxPts
+              maxPts = v
+            } else if (v > secondMax) secondMax = v
+          }
+        }
+        child.stdout.on('data', (d) => eat(d.toString()))
+        child.on('error', () => resolve(null))
+        child.on('close', () => {
+          if (buf) eat(buf + '\n')
+          if (!(maxPts >= 0)) return resolve(null)
+          // 补一帧的余量，别把最后那帧算没了
+          const frame = maxPts > secondMax && secondMax >= 0 ? Math.min(0.2, maxPts - secondMax) : 0.04
+          resolve(maxPts + frame)
+        })
       })
     })
   }
@@ -421,6 +564,7 @@ class RecorderManager {
     if (!jobs.length) return { ok: true, recovered: 0 }
 
     let recovered = 0
+    const skipped = []
     const failed = []
     const sizeOf = (p) => {
       try {
@@ -439,7 +583,11 @@ class RecorderManager {
       }
       const newest = job.kind === 'session' ? Math.max(...job.parts.map(mtimeOf)) : mtimeOf(job.file)
       // 还在写（30 秒内有变动）就跳过，别抢正在录的
-      if (Date.now() - newest < 30 * 1000) continue
+      if (Date.now() - newest < 30 * 1000) {
+        skipped.push(job.name)
+        this.rlog('recover orphan skipped (still fresh)', { name: job.name, ageMs: Date.now() - newest })
+        continue
+      }
 
       const bytes = job.kind === 'session' ? job.parts.reduce((n, p) => n + sizeOf(p), 0) : sizeOf(job.file)
       if (bytes < 10 * 1024) {
@@ -474,7 +622,7 @@ class RecorderManager {
         this.notice(`上次的录制合并失败，原始文件还在 ${job.dir || job.file}`)
       }
     }
-    return { ok: true, recovered, failed }
+    return { ok: true, recovered, failed, skipped }
   }
 
   /** 该 webContents 最近一次请求到的流地址（超过 MAX_URL_AGE_MS 视为过期） */
@@ -620,6 +768,17 @@ class RecorderManager {
     return path.join(this.outDir, `${label}_${stamp(new Date(startedAt))}`)
   }
 
+  /**
+   * 这一场录制对应的目录。
+   * stream 模式在开录时就有 act.dir；屏幕/整窗录制要到停止转码才建目录，
+   * 这里按同一套命名规则先算出来，这样"边看边截"的精彩片段能和这场录制放进同一个文件夹。
+   */
+  sessionDirOf(act) {
+    if (!act) return this.outDir
+    if (act.dir) return act.dir
+    return this.sessionDirFor(act.label || '录制', act.startedAt || Date.now())
+  }
+
   /** 会话目录里的 part 文件（按编号排序） */
   listParts(dir) {
     try {
@@ -668,12 +827,35 @@ class RecorderManager {
     const partIndex = this.nextPartIndex(dir)
     const pattern = path.join(dir, `part%0${PART_PAD}d.mkv`)
 
+    // 优酷这类站点的 m3u8 带签名，光给 UA+Referer 常常 403；把页面 cookie / Origin 一起带上
+    let headerLines = [`Referer: ${params.referer || 'https://live.douyin.com/'}`]
+    if (params.cookie) headerLines.push(`Cookie: ${params.cookie}`)
+    if (params.origin) headerLines.push(`Origin: ${params.origin}`)
+
+    /**
+     * ffmpeg 的 `-headers` 是**一整块**字符串，超过上限时它不报"头太长"，而是直接
+     * `Error opening input files: Invalid argument`（exit -22）——看起来像"地址无效"，
+     * 极难查。实测（ffmpeg 8.1.1，同一路抖音直播）：整块 7000 字能录，7400 字就 EINVAL。
+     * 抖音的 cookie 现在能到 7.8 KB，所以这里做个硬保险：太长就把 Cookie 丢掉，
+     * 保住录制（Referer / Origin 留着，够用）。
+     */
+    const MAX_HEADER_CHARS = 6000
+    if (headerLines.join('\r\n').length > MAX_HEADER_CHARS) {
+      const cookieLen = String(params.cookie || '').length
+      headerLines = headerLines.filter((l) => !/^Cookie:\s/i.test(l))
+      this.rlog('headers too long, cookie dropped', {
+        cookieLen,
+        referer: String(params.referer || ''),
+        limit: MAX_HEADER_CHARS
+      })
+    }
+
     const args = [
       '-y',
       '-user_agent',
       UA,
       '-headers',
-      `Referer: ${params.referer || 'https://live.douyin.com/'}\r\n`,
+      headerLines.join('\r\n') + '\r\n',
       '-i',
       params.streamUrl
     ]
@@ -700,6 +882,16 @@ class RecorderManager {
     } else {
       args.push('-f', 'matroska', path.join(dir, `part${String(partIndex).padStart(PART_PAD, '0')}.mkv`))
     }
+
+    // 诊断用：ffmpeg 报 "Invalid argument" 时，先确认喂给它的到底是什么。
+    // 走 rlog（写 rec.log，不依赖 PR_LOG），并且**完整**记录 URL（不做截断）——
+    // 因为 ffmpeg 对"空 / 带前导空白 / 只有 query"的地址都报同样的 Invalid argument。
+    this.rlog('rec ffmpeg args', {
+      len: String(params.streamUrl || '').length,
+      url: String(params.streamUrl || ''),
+      headers: headerLines.map((h) => h.slice(0, 24) + (h.length > 24 ? `…(${h.length})` : '')),
+      referer: String(params.referer || '')
+    })
 
     const child = spawn(this.ffmpeg, args, { windowsHide: true, stdio: ['pipe', 'ignore', 'pipe'] })
     let stderr = ''
@@ -943,6 +1135,399 @@ class RecorderManager {
     if (!act || act.mode !== 'stream') return
     await this.haltStreamChild(act)
     await this.finalizeSession(act, {})
+  }
+
+  /**
+   * 边看边截：把**最近 N 秒**单独存成一个精彩片段（不停止录制）。
+   *
+   * 数据来源就是正在写的分段文件（stream 模式是 partNNNN.mkv，screen 模式是临时 webm），
+   * 所以取的长度受"当前这一份文件已经写了多久"限制——不够长就自动把前一段也带上。
+   * 全程 -c copy，不重编码（copy 不成就退一次 x264）。
+   */
+  async snapshotRecent(uid, seconds = 10, opts = {}) {
+    if (!this.ffmpeg) return { ok: false, error: '没找到 ffmpeg' }
+    const key = String(uid || '')
+    const act = key ? this.actives.get(key) : null
+    // 每次请求都记一笔（包括早期失败），不然用户"点了没反应"时查不出原因
+    this.rlog('snapshot request', { uid: key, seconds, hasAct: Boolean(act), mode: act ? act.mode : '', dir: act ? act.dir || act.webmPath || '' : '' })
+    if (!act) {
+      return { ok: false, error: `这个房间现在没在录制（uid=${key || '空'}）：精彩片段是从正在录的流里截的` }
+    }
+    const want = Math.max(1, Math.min(120, Number(seconds) || 10))
+
+    // 候选文件：从最后一段往前，凑够 want + 1.5 秒
+    let useFiles = []
+    if (act.mode === 'screen') {
+      if (act.webmPath && fs.existsSync(act.webmPath)) useFiles = [act.webmPath]
+    } else {
+      const recs = []
+      let acc = 0
+      const parts = this.listParts(act.dir)
+      for (let i = parts.length - 1; i >= 0 && acc < want + 1.5; i--) {
+        const d = (await this.probeDurationLoose(parts[i])) || 0
+        if (d < 0.2) continue
+        recs.unshift(parts[i])
+        acc += d
+      }
+      useFiles = recs
+    }
+    if (!useFiles.length) {
+      const bytes = act.mode === 'screen' ? 0 : this.partsBytes(act.dir)
+      this.rlog('snapshot: no readable parts yet', { uid: key, dir: act.dir, bytes })
+      return {
+        ok: false,
+        error: `刚开录，这一段的缓存还没落盘（${Math.round(bytes / 1024)}KB），等 5~10 秒再点`
+      }
+    }
+
+    let total = 0
+    for (const f of useFiles) total += (await this.probeDurationLoose(f)) || 0
+    if (total < 0.5) return { ok: false, error: '这一份文件还没写满 1 秒，稍等再截' }
+    const startAt = Math.max(0, total - want)
+
+    // -c copy 只能落在关键帧上：量出切点会往前漂多少（drift），把 -t 补上同样多，
+    // 才能保证"结束点 = 现在"，而不是整体往前挪一个 GOP。
+    const offsets = []
+    {
+      let acc = 0
+      for (const f of useFiles) {
+        offsets.push(acc)
+        acc += (await this.probeDurationLoose(f)) || 0
+      }
+    }
+    let cutAt = startAt
+    let cutFile = useFiles[0]
+    let cutOffset = 0
+    for (let i = useFiles.length - 1; i >= 0; i--) {
+      if (startAt >= offsets[i] - 0.001) {
+        cutFile = useFiles[i]
+        cutOffset = offsets[i]
+        break
+      }
+    }
+    const kf = await this.lastKeyframeBefore(cutFile, Math.max(0.01, startAt - cutOffset))
+    if (kf !== null) cutAt = Math.max(0, cutOffset + kf)
+    const drift = Math.max(0, startAt - cutAt)
+    // 关键帧漂移 <=0.25s 时：从关键帧开始 copy，用 -t 把多出来的 lead-in 一起算进去，
+    // 这样"结束点"仍然落在现在；漂移更大就宁可重编码这几秒，换来精确的起止
+    // （实测 1080p60 大约 0.2 秒/秒，30 秒的片段约 6 秒，比"切歪一个 GOP"划算）。
+    const precise = drift > 0.25
+    const seekAt = precise ? startAt : cutAt
+    const clipLen = precise ? Math.min(total - seekAt, want) : Math.min(total - cutAt, want + drift)
+
+    // 精彩片段和这一场录制放同一个目录（<房间名>_<时间戳>/），别撒在录制目录根上
+    const dir = opts.outDir ? path.resolve(String(opts.outDir)) : this.sessionDirOf(act)
+    fs.mkdirSync(dir, { recursive: true })
+    // 命名规则：<主播>_<时间戳>_精彩<Ns>.mp4 —— 时间戳在前，和同一场的成片/分段并排时按时间排得整齐
+    const base = `${act.label}_${stamp(new Date())}_精彩${want}s`
+    let out = path.join(dir, `${base}.mp4`)
+    if (fs.existsSync(out)) out = path.join(dir, `${base}_${Math.random().toString(36).slice(2, 6)}.mp4`)
+
+    // 多份文件先拼：concat 列表写临时文件；-ss 放输入侧（快）。
+    let inputArgs = []
+    let listFile = ''
+    if (useFiles.length === 1) {
+      inputArgs = ['-ss', seekAt.toFixed(3), '-i', useFiles[0]]
+    } else {
+      listFile = path.join(this.tmpDir, `replay_${Date.now()}.txt`)
+      fs.mkdirSync(this.tmpDir, { recursive: true })
+      fs.writeFileSync(listFile, useFiles.map((f) => `file '${f.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`).join('\n'))
+      inputArgs = ['-ss', seekAt.toFixed(3), '-f', 'concat', '-safe', '0', '-i', listFile]
+    }
+
+    const runCopy = () =>
+      this.runFfmpeg([
+        '-y',
+        ...inputArgs,
+        '-t',
+        clipLen.toFixed(2),
+        '-c',
+        'copy',
+        '-movflags',
+        '+faststart',
+        out
+      ])
+    const runReencode = () =>
+      this.runFfmpeg([
+        '-y',
+        ...inputArgs,
+        '-t',
+        clipLen.toFixed(2),
+        '-c:v',
+        'libx264',
+        '-preset',
+        'veryfast',
+        '-crf',
+        '20',
+        '-c:a',
+        'aac',
+        '-b:a',
+        '160k',
+        '-movflags',
+        '+faststart',
+        out
+      ])
+
+    const t0 = Date.now()
+    try {
+      if (precise) {
+        // GOP 太稀：直接重编码这几秒，起止都精确
+        await runReencode()
+      } else {
+        try {
+          await runCopy()
+        } catch (err) {
+          this.rlog('snapshot copy failed, re-encode once', { err: String((err && err.message) || err).slice(-200) })
+          await runReencode()
+        }
+      }
+      const size = (() => {
+        try {
+          return fs.statSync(out).size
+        } catch {
+          return 0
+        }
+      })()
+      const realDur = (await this.probeDurationLoose(out)) || clipLen
+      this.rlog('snapshot done', { label: act.label, want, realDur, drift, precise, ms: Date.now() - t0, out })
+      this.notice(`「${act.label}」已截取最近 ${want} 秒精彩片段（${path.basename(out)}）`)
+      return { ok: true, out, seconds: Math.round(realDur * 100) / 100, request: want, size, mode: act.mode, precise }
+    } catch (err) {
+      this.rlog('snapshot failed', { label: act.label, err: String((err && err.message) || err).slice(-300) })
+      return { ok: false, error: String((err && err.message) || err).slice(-300) }
+    } finally {
+      if (listFile) {
+        try {
+          fs.unlinkSync(listFile)
+        } catch {}
+      }
+    }
+  }
+
+  /**
+   * 从**本地视频文件**里按"当前播放进度"截一段：覆盖 `[atSec - seconds, atSec]`。
+   *
+   * 和"边看边截"是同一套算法（关键帧漂移补偿 + copy/重编码二选一），
+   * 区别只是来源从"正在写的分段"换成一个现成的文件。
+   */
+  async clipFromFile({ file, atSec, seconds, outDir, name } = {}) {
+    if (!this.ffmpeg) return { ok: false, error: '没找到 ffmpeg' }
+    const src = path.resolve(String(file || ''))
+    if (!src || !fs.existsSync(src)) return { ok: false, error: '文件不存在：' + (file || '') }
+    const dur = (await this.probeDurationLoose(src)) || 0
+    if (!(dur > 0.5)) return { ok: false, error: '读不出这个文件的时长（可能还没写完/已损坏）' }
+    const wantRaw = Math.max(1, Math.min(120, Number(seconds) || 10))
+    const at = Math.max(0, Math.min(dur, Number(atSec) || 0))
+    // 片段以"当前播放进度"结尾；播放点还没走满 N 秒时，最多只取到开头，别跨过去往前拽
+    const startAt = Math.max(0, at - wantRaw)
+    const want = at > 0.3 ? Math.min(wantRaw, at) : Math.min(wantRaw, dur)
+    if (!(want > 0.3)) return { ok: false, error: '这段太短了（当前进度太靠前？）' }
+
+    const dir = outDir ? path.resolve(String(outDir)) : path.dirname(src)
+    fs.mkdirSync(dir, { recursive: true })
+    const base = String(name || path.basename(src).replace(/\.[^.]+$/, '')).replace(/[\\/:*?"<>|]/g, '_')
+    // 同样把时间戳放前面：<原文件名>_<时间戳>_精彩<Ns>.mp4
+    const tag = Math.max(1, Math.round(want))
+    const stampNow = stamp(new Date())
+    let out = path.join(dir, `${base}_${stampNow}_精彩${tag}s.mp4`)
+    if (fs.existsSync(out)) out = path.join(dir, `${base}_${stampNow}_精彩${tag}s_${Math.random().toString(36).slice(2, 6)}.mp4`)
+
+    const kf = await this.lastKeyframeBefore(src, Math.max(0.01, startAt))
+    const cutAt = kf === null ? startAt : Math.max(0, kf)
+    const drift = Math.max(0, startAt - cutAt)
+    const precise = drift > 0.25
+    const seekAt = precise ? startAt : cutAt
+    const clipLen = precise ? want : Math.min(dur - cutAt, want + drift)
+
+    const t0 = Date.now()
+    this.rlog('clip-from-file request', { src, at, want: wantRaw, dur, drift, precise })
+    try {
+      const common = ['-y', '-ss', seekAt.toFixed(3), '-i', src, '-t', clipLen.toFixed(2)]
+      if (!precise) {
+        try {
+          await this.runFfmpeg([...common, '-c', 'copy', '-movflags', '+faststart', out])
+        } catch (err) {
+          this.rlog('clip-from-file copy failed, re-encode', { err: String((err && err.message) || err).slice(-200) })
+          await this.runFfmpeg([...common, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart', out])
+        }
+      } else {
+        await this.runFfmpeg([...common, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart', out])
+      }
+      const size = (() => {
+        try {
+          return fs.statSync(out).size
+        } catch {
+          return 0
+        }
+      })()
+      const realDur = (await this.probeDurationLoose(out)) || clipLen
+      this.rlog('clip-from-file done', { out, realDur, ms: Date.now() - t0, precise })
+      return { ok: true, out, seconds: Math.round(realDur * 100) / 100, request: wantRaw, size, precise, at }
+    } catch (err) {
+      this.rlog('clip-from-file failed', { src, err: String((err && err.message) || err).slice(-300) })
+      return { ok: false, error: String((err && err.message) || err).slice(-300) }
+    }
+  }
+
+  /**
+   * 列出某一场目录里的精彩片段 / 精修片段（全屏小窗用）。
+   * 只认 `<名字>_精彩<Ns>.mp4` 和 `<名字>_精修<Ns>.mp4` 两种命名，按时间从旧到新排。
+   */
+  listClips(dir) {
+    const d = path.resolve(String(dir || ''))
+    if (!d || d === path.resolve('') || !fs.existsSync(d)) {
+      return { ok: false, error: '目录不存在：' + (dir || '（空）'), dir: d, clips: [] }
+    }
+    let names = []
+    try {
+      names = fs.readdirSync(d)
+    } catch (err) {
+      return { ok: false, error: String((err && err.message) || err), dir: d, clips: [] }
+    }
+    const clips = names
+      .filter((n) => /_(?:精彩|精修)\d+s(?:_[a-z0-9]{2,6})?\.mp4$/i.test(n))
+      .map((n) => {
+        const p = path.join(d, n)
+        let st = null
+        try {
+          st = fs.statSync(p)
+        } catch {}
+        return { path: p, name: n, size: st ? st.size : 0, mtime: st ? st.mtimeMs : 0 }
+      })
+      .sort((a, b) => a.mtime - b.mtime)
+    this.rlog('list-clips', { dir: d, n: clips.length })
+    return { ok: true, dir: d, clips }
+  }
+
+  /**
+   * 最近一场"有精彩片段"的录制目录。
+   *
+   * 用途：重启程序、或者已经停录之后，全屏小窗照样能直接把刚截的片段列出来
+   * （否则它只知道"当前在录的那一场"，停录后就空了）。
+   */
+  lastClipsDir() {
+    const root = this.outDir
+    let names = []
+    try {
+      names = fs.readdirSync(root)
+    } catch (err) {
+      return { ok: false, error: '录制目录读不到：' + String((err && err.message) || err), dir: '', clips: [] }
+    }
+    const isClip = (f) => /_(?:精彩|精修)\d+s(?:_[a-z0-9]{2,6})?\.mp4$/i.test(f)
+    let best = null
+    for (const n of names) {
+      const d = path.join(root, n)
+      let files = []
+      try {
+        if (!fs.statSync(d).isDirectory()) continue
+        files = fs.readdirSync(d)
+      } catch {
+        continue
+      }
+      let newest = 0
+      for (const f of files) {
+        if (!isClip(f)) continue
+        try {
+          newest = Math.max(newest, fs.statSync(path.join(d, f)).mtimeMs)
+        } catch {}
+      }
+      if (newest && (!best || newest > best.newest)) best = { dir: d, newest }
+    }
+    if (!best) return { ok: false, error: '还没有任何精彩片段', dir: '', clips: [] }
+    const r = this.listClips(best.dir)
+    return { ok: true, dir: best.dir, clips: r.clips || [] }
+  }
+
+  /**
+   * 按任意区间 [startSec, endSec] 从已有文件里切一段 —— 全屏小窗的「两端精修」。
+   *
+   * 策略和 clipFromFile 完全一致：切点落在最近的关键帧上，漂移 ≤0.25s 就 copy 并
+   * 用 -t 把 lead-in 补回来；漂移更大就重编码这一段，换来精确的左右端点。
+   */
+  async clipRange({ file, startSec, endSec, outDir, name, overwrite } = {}) {
+    if (!this.ffmpeg) return { ok: false, error: '没找到 ffmpeg' }
+    const src = path.resolve(String(file || ''))
+    if (!src || !fs.existsSync(src)) return { ok: false, error: '文件不存在：' + (file || '') }
+    const dur = (await this.probeDurationLoose(src)) || 0
+    if (!(dur > 0.5)) return { ok: false, error: '读不出这个文件的时长（可能还没写完/已损坏）' }
+    let a = Math.max(0, Math.min(dur, Number(startSec) || 0))
+    let b = Math.max(0, Math.min(dur, Number.isFinite(Number(endSec)) ? Number(endSec) : dur))
+    if (b < a) [a, b] = [b, a]
+    if (!(b - a > 0.2)) return { ok: false, error: `选区太短了（${(b - a).toFixed(2)} 秒）` }
+
+    const isOverwrite = overwrite === true
+    const dir = outDir ? path.resolve(String(outDir)) : path.dirname(src)
+    fs.mkdirSync(dir, { recursive: true })
+    const base = String(name || path.basename(src).replace(/\.[^.]+$/, '')).replace(/[\\/:*?"<>|]/g, '_')
+    const tag = Math.max(1, Math.round(b - a))
+    const stampNow = stamp(new Date())
+    // 覆盖模式：先写同目录的临时文件，成功后再顶掉原文件（避免 ffmpeg 边读边写同一个文件）
+    let finalOut = path.join(dir, `${base}_${stampNow}_精修${tag}s.mp4`)
+    if (!isOverwrite && fs.existsSync(finalOut)) {
+      finalOut = path.join(dir, `${base}_${stampNow}_精修${tag}s_${Math.random().toString(36).slice(2, 6)}.mp4`)
+    }
+    const writeTo = isOverwrite ? path.join(dir, `.${base}.overwrite-${Date.now().toString(36)}.mp4`) : finalOut
+
+    const kf = await this.lastKeyframeBefore(src, Math.max(0.01, a))
+    const cutAt = kf === null ? a : Math.max(0, kf)
+    const drift = Math.max(0, a - cutAt)
+    const precise = drift > 0.25
+    const seekAt = precise ? a : cutAt
+    const clipLen = precise ? b - a : Math.min(b - cutAt, b - a + drift)
+
+    const t0 = Date.now()
+    this.rlog('clip-range request', { src, a, b, dur, drift, precise, overwrite: isOverwrite })
+    try {
+      const common = ['-y', '-ss', seekAt.toFixed(3), '-i', src, '-t', clipLen.toFixed(2)]
+      if (!precise) {
+        try {
+          await this.runFfmpeg([...common, '-c', 'copy', '-movflags', '+faststart', writeTo])
+        } catch (err) {
+          this.rlog('clip-range copy failed, re-encode', { err: String((err && err.message) || err).slice(-200) })
+          await this.runFfmpeg([...common, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart', writeTo])
+        }
+      } else {
+        await this.runFfmpeg([...common, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart', writeTo])
+      }
+      const size = (() => {
+        try {
+          return fs.statSync(writeTo).size
+        } catch {
+          return 0
+        }
+      })()
+      if (!(size > 0)) throw new Error('ffmpeg 没写出内容（选区可能有问题）')
+
+      let out = writeTo
+      if (isOverwrite) {
+        // 先量一下新文件确实是好的，再顶掉原文件；顶不掉就把临时文件留着当救援
+        const newDur = (await this.probeDurationLoose(writeTo)) || 0
+        if (!(newDur > 0.1)) throw new Error('新文件读不出时长，已保留临时文件：' + path.basename(writeTo))
+        try {
+          fs.rmSync(src, { force: true })
+          fs.renameSync(writeTo, src)
+        } catch (err) {
+          throw new Error('替换原文件失败（临时文件还在：' + path.basename(writeTo) + '）：' + String((err && err.message) || err))
+        }
+        out = src
+      }
+
+      const realDur = (await this.probeDurationLoose(out)) || clipLen
+      this.rlog('clip-range done', { out, realDur, ms: Date.now() - t0, precise, overwrite: isOverwrite })
+      return {
+        ok: true,
+        out,
+        seconds: Math.round(realDur * 100) / 100,
+        startSec: Math.round(a * 100) / 100,
+        endSec: Math.round(b * 100) / 100,
+        size,
+        precise,
+        overwritten: isOverwrite
+      }
+    } catch (err) {
+      this.rlog('clip-range failed', { src, err: String((err && err.message) || err).slice(-300) })
+      return { ok: false, error: String((err && err.message) || err).slice(-300) }
+    }
   }
 
   /**
@@ -1370,10 +1955,65 @@ class RecorderManager {
     return dirName
   }
 
-  /** 通用的 ffmpeg 执行（合并 / 封装共用） */
-  runFfmpeg(args) {
+  /**
+   * 带进度的 ffmpeg 执行：给参数加上 `-progress pipe:1`，把 ffmpeg 打到 stdout 的
+   * `out_time_us=/speed=/progress=continue|end` 解析成 { outTime, speed, frame, done }。
+   * 只在后台干活（拼接 / 转码）时用，录制时不能加（录制是 -c copy，没有这么多输出）。
+   */
+  runFfmpegProgress(args, onTick) {
     return new Promise((resolve, reject) => {
-      const child = spawn(this.ffmpeg, args, { windowsHide: true })
+      const child = spawn(this.ffmpeg, ['-progress', 'pipe:1', ...args], { windowsHide: true })
+      let stderr = ''
+      let buf = ''
+      const st = { outTime: 0, speed: '', frame: 0 }
+      const flush = () => {
+        if (typeof onTick !== 'function') return
+        try {
+          onTick({ ...st })
+        } catch {}
+      }
+      child.stdout.on('data', (d) => {
+        buf += d.toString()
+        let idx
+        while ((idx = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, idx).trim()
+          buf = buf.slice(idx + 1)
+          const eq = line.indexOf('=')
+          if (eq < 0) continue
+          const k = line.slice(0, eq)
+          const v = line.slice(eq + 1).trim()
+          if (k === 'out_time_us' || k === 'out_time_ms') {
+            const us = Number(v)
+            if (Number.isFinite(us)) st.outTime = us / 1e6
+          } else if (k === 'out_time') {
+            const m = /^(\d+):(\d+):(\d+(?:\.\d+)?)$/.exec(v)
+            if (m) st.outTime = Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3])
+          } else if (k === 'speed') {
+            st.speed = v
+          } else if (k === 'frame') {
+            const f = Number(v)
+            if (Number.isFinite(f)) st.frame = f
+          } else if (k === 'progress') {
+            flush()
+          }
+        }
+      })
+      child.stderr.on('data', (d) => {
+        stderr += d.toString()
+        if (stderr.length > 8000) stderr = stderr.slice(-8000)
+      })
+      child.on('error', reject)
+      child.on('close', (code) => {
+        if (code === 0) resolve(true)
+        else reject(new Error(`ffmpeg exit ${code}: ${stderr.slice(-300)}`))
+      })
+    })
+  }
+
+  /** 通用的 ffmpeg 执行（合并 / 封装共用）；opts 可传 cwd 之类 */
+  runFfmpeg(args, opts) {
+    return new Promise((resolve, reject) => {
+      const child = spawn(this.ffmpeg, args, { windowsHide: true, ...(opts || {}) })
       let stderr = ''
       child.stderr.on('data', (d) => {
         stderr += d.toString()
@@ -1385,6 +2025,933 @@ class RecorderManager {
         else reject(new Error(`ffmpeg exit ${code}: ${stderr.slice(-300)}`))
       })
     })
+  }
+
+  /* ------------------------------ 多窗口拼接 ------------------------------ */
+
+  /**
+   * 把几路录好的文件拼成"一张多窗口画面"（2×2 之类的视频墙）。
+   *
+   * 每一路可以单独：
+   *   gain    音量倍数（0 = 静音，1 = 原样，>1 放大）
+   *   delay   起始延迟秒数（做"进度对齐"时用：让这一路晚一点开始，前面补黑场）
+   *   seek    从这一路文件开头砍掉多少秒（"从标定点开始"模式：标定帧就是成片的 0 秒）
+   * 视频用 xstack 摆格子，音频用 amix(normalize=0) 按各自音量混——
+   * normalize=0 很关键，否则 ffmpeg 会把所有输入都压小，用户设的音量就没意义了。
+   *
+   * 两种对齐思路的区别（标定时刻记作 mark_i）：
+   *   delay_i = max(mark) - mark_i           → 标定帧在所有窗口的同一个主时刻出现（T* = max mark），
+   *                                            前面保留完整素材，所以成片前段会有黑格子；
+   *                                            配合「只用对齐区间」从 t = max(delay) 开始导出。
+   *   seek_i  = mark_i（delay 全 0）          → 直接把标定之前的素材砍掉，标定帧就是成片 0 秒。
+   *
+   * @param {{files:string[], cols?:number, rows?:number, gains?:number[], delays?:number[],
+   *          seeks?:number[], rangeStart?:number, rangeEnd?:number,
+   *          outDir?:string, name?:string, fps?:number, width?:number, encoder?:string,
+   *          taskId?:string, onProgress?:Function}} p
+   */
+  async renderMosaic(p = {}) {
+    const picked = (Array.isArray(p.files) ? p.files : [])
+      .map((f) => path.resolve(String(f)))
+      .filter((f) => fs.existsSync(f))
+    if (picked.length < 2) return { ok: false, error: '至少选两个文件' }
+    const list = picked.slice(0, 9)
+    const n = list.length
+    const cols = Math.max(1, Math.min(3, Math.floor(Number(p.cols) || Math.ceil(Math.sqrt(n)))))
+    const rows = Math.max(1, Math.min(3, Math.floor(Number(p.rows) || Math.ceil(n / cols))))
+    if (cols * rows < n) return { ok: false, error: `布局 ${cols}×${rows} 放不下 ${n} 路` }
+
+    const totalW = Math.max(320, Math.min(3840, Math.floor(Number(p.width) || 1920)))
+    const totalH = Math.max(180, Math.min(2160, Math.round(((totalW * 9) / 16) / 2) * 2))
+    const cw = Math.floor(totalW / cols / 2) * 2
+    const ch = Math.floor(totalH / rows / 2) * 2
+    const fps = Math.max(10, Math.min(60, Math.floor(Number(p.fps) || 30)))
+    const gains = list.map((_, i) => {
+      const g = Number((p.gains || [])[i])
+      return Number.isFinite(g) ? Math.max(0, Math.min(4, g)) : 1
+    })
+    const delays = list.map((_, i) => {
+      const d = Number((p.delays || [])[i])
+      return Number.isFinite(d) && d > 0 ? Math.min(86400, d) : 0
+    })
+    // seeks[i] = 从这一路文件开头砍掉多少秒（"从标定点开始"模式：标定帧就是成片的 0 秒）
+    const seeks = list.map((_, i) => {
+      const s = Number((p.seeks || [])[i])
+      return Number.isFinite(s) && s > 0 ? Math.min(86400, s) : 0
+    })
+
+    const outDir = path.resolve(p.outDir || path.dirname(list[0]))
+    try {
+      fs.mkdirSync(outDir, { recursive: true })
+    } catch {}
+    const base = sanitize((p.name || '').trim() || `拼接_${list.length}路_${stamp()}`)
+    let out = path.join(outDir, `${base}.mp4`)
+    if (fs.existsSync(out)) {
+      let k = 0
+      do {
+        k += 1
+        out = path.join(outDir, `${base}_${k}.mp4`)
+      } while (fs.existsSync(out) && k < 50)
+    }
+
+    const layoutParts = []
+    for (let i = 0; i < n; i++) {
+      const c = i % cols
+      const r = Math.floor(i / cols)
+      layoutParts.push(`${c * cw}_${r * ch}`)
+    }
+
+    // 只导出「共同区间」：所有窗口都有画面的那一段（起点 = 最晚开始，终点 = 最早结束）
+    const rangeStart = Number(p.rangeStart)
+    const rangeEnd = Number(p.rangeEnd)
+    const trim =
+      Number.isFinite(rangeStart) && Number.isFinite(rangeEnd) && rangeStart >= 0 && rangeEnd - rangeStart >= 0.2
+        ? { s: Math.round(rangeStart * 1000) / 1000, e: Math.round(rangeEnd * 1000) / 1000 }
+        : null
+
+    const buildFilters = (withAudio) => {
+      const f = []
+      for (let i = 0; i < n; i++) {
+        const d = delays[i]
+        // 每一路：等比缩放 + 补黑边到格子大小（不裁画面）
+        f.push(
+          `[${i}:v]scale=${cw}:${ch}:force_original_aspect_ratio=decrease,` +
+            `pad=${cw}:${ch}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=${fps},format=yuv420p,setpts=PTS-STARTPTS` +
+            (d > 0 ? `,tpad=start_duration=${d}:start_mode=add:color=black` : '') +
+            `[v${i}]`
+        )
+      }
+      f.push(`${Array.from({ length: n }, (_, i) => `[v${i}]`).join('')}xstack=inputs=${n}:layout=${layoutParts.join('|')}:fill=black[vstack]`)
+      if (trim) {
+        f.push(`[vstack]trim=start=${trim.s}:end=${trim.e},setpts=PTS-STARTPTS[vout]`)
+      } else {
+        f.push('[vstack]null[vout]')
+      }
+      if (withAudio) {
+        for (let i = 0; i < n; i++) {
+          const d = delays[i]
+          f.push(
+            `[${i}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,` +
+              `volume=${gains[i]},asetpts=PTS-STARTPTS` +
+              (d > 0 ? `,adelay=delays=${Math.round(d * 1000)}:all=1` : '') +
+              `[a${i}]`
+          )
+        }
+        f.push(`${Array.from({ length: n }, (_, i) => `[a${i}]`).join('')}amix=inputs=${n}:normalize=0:duration=longest:dropout_transition=0[amix]`)
+        if (trim) {
+          f.push(`[amix]atrim=start=${trim.s}:end=${trim.e},asetpts=PTS-STARTPTS[aout]`)
+        } else {
+          f.push('[amix]anull[aout]')
+        }
+      }
+      return f.join(';')
+    }
+
+    const inputArgs = []
+    for (let i = 0; i < list.length; i++) {
+      // 输入级 -ss：先砍掉标定之前的部分（快，不用全解码）
+      if (seeks[i] > 0) inputArgs.push('-ss', String(seeks[i]))
+      inputArgs.push('-i', list[i])
+    }
+    const enc = this.encoderArgs({ encoder: p.encoder === 'nvenc' ? 'nvenc' : 'x264' })
+
+    // 估算成片总时长（用来算进度百分比）：只出对齐区间时就是区间长度，
+    // 否则是最晚结束的那一路（砍头之后：延迟 + 剩余时长）
+    let total = 0
+    if (trim) {
+      total = Math.max(0.1, trim.e - trim.s)
+    } else {
+      const durs = await Promise.all(list.map((f) => this.probeDuration(f)))
+      for (let i = 0; i < n; i++) total = Math.max(total, delays[i] + Math.max(0, (durs[i] || 0) - seeks[i]))
+    }
+    const onProgress = typeof p.onProgress === 'function' ? p.onProgress : null
+    const runOnce = async (withAudio) => {
+      const args = ['-y', ...inputArgs, '-filter_complex', buildFilters(withAudio)]
+      args.push('-map', '[vout]')
+      if (withAudio) args.push('-map', '[aout]', '-c:a', 'aac', '-b:a', '192k')
+      args.push(...enc, '-movflags', '+faststart', out)
+      if (!onProgress) return this.runFfmpeg(args)
+      const taskId = p.taskId || ''
+      try {
+        onProgress({ taskId, stage: 'render', pct: 0, outTime: 0, total, speed: '' })
+      } catch {}
+      return this.runFfmpegProgress(args, (st) => {
+        const pct = total > 0 ? Math.max(0, Math.min(99.9, (st.outTime / total) * 100)) : null
+        try {
+          onProgress({ taskId, stage: 'render', pct, outTime: st.outTime, total, speed: st.speed, frame: st.frame })
+        } catch {}
+      })
+    }
+
+    const started = Date.now()
+    this.rlog('mosaic start', { n, cols, rows, cw, ch, out, gains, delays, seeks, trim })
+    try {
+      await runOnce(true)
+    } catch (err) {
+      // 有的文件可能没有音轨 —— 退一步只出画面
+      this.rlog('mosaic with audio failed, retry video-only', { err: String((err && err.message) || err).slice(-200) })
+      try {
+        await runOnce(false)
+      } catch (err2) {
+        return { ok: false, error: String((err2 && err2.message) || err2) }
+      }
+    }
+    let size = 0
+    try {
+      size = fs.statSync(out).size
+    } catch {}
+    const ms = Date.now() - started
+    this.rlog('mosaic done', { out, size, ms })
+    if (onProgress) {
+      try {
+        onProgress({ taskId: p.taskId || '', stage: 'done', pct: 100, outTime: total, total, speed: '' })
+      } catch {}
+    }
+    return {
+      ok: true,
+      out,
+      size,
+      ms,
+      n,
+      cols,
+      rows,
+      cell: { w: cw, h: ch },
+      size2: `${totalW}x${totalH}`,
+      duration: Math.round(total * 100) / 100,
+      delays,
+      seeks,
+      range: trim ? { start: trim.s, end: trim.e } : null
+    }
+  }
+
+  /* ------------------------------ 精彩片段 ------------------------------ */
+
+  /**
+   * 找"精彩镜头"：用 ffmpeg 的 scene 检测（画面变化剧烈处 = 切镜/爆发动作），
+   * 再按最小间隔贪心挑前 count 个。
+   * @param {{file:string, count?:number, seconds?:number, minGap?:number, threshold?:number}} p
+   */
+  async analyzeHighlights(p = {}) {
+    const file = path.resolve(String(p.file || ''))
+    if (!fs.existsSync(file)) return { ok: false, error: '文件不存在' }
+    const count = Math.max(1, Math.min(12, Math.floor(Number(p.count) || 5)))
+    const seconds = Math.max(1, Math.min(20, Number(p.seconds) || 6))
+    const minGap = Math.max(1, Math.min(300, Number(p.minGap) || 8))
+    const threshold = Math.max(0.05, Math.min(0.9, Number(p.threshold) || 0.25))
+    const dur = (await this.probeDuration(file)) || 0
+    const nullOut = process.platform === 'win32' ? 'NUL' : '/dev/null'
+    const started = Date.now()
+
+    // ffmpeg 的 filter 参数里路径带盘符冒号非常容易解析失败，
+    // 所以把 metadata 写到"用 cwd 定位的相对文件名"，绕开转义问题
+    const workDir = app.getPath('temp')
+    const scan = async (thr) => {
+      const fname = `pr-scene-${Date.now()}-${Math.round(thr * 100)}.txt`
+      const full = path.join(workDir, fname)
+      try {
+        await this.runFfmpeg(
+          [
+            '-y',
+            '-hide_banner',
+            '-loglevel',
+            'error',
+            '-i',
+            file,
+            '-vf',
+            `select='gt(scene,${thr})',metadata=mode=print:file=${fname}`,
+            '-an',
+            '-f',
+            'null',
+            nullOut
+          ],
+          { cwd: workDir }
+        )
+      } catch (err) {
+        try {
+          fs.unlinkSync(full)
+        } catch {}
+        throw err
+      }
+      let raw = ''
+      try {
+        raw = fs.readFileSync(full, 'utf8')
+      } catch {}
+      try {
+        fs.unlinkSync(full)
+      } catch {}
+      const list = []
+      let cur = null
+      for (const line of raw.split(/\r?\n/)) {
+        const mTime = /pts_time:([\d.]+)/.exec(line)
+        if (mTime) {
+          cur = { time: Number(mTime[1]), score: 0 }
+          continue
+        }
+        const mScore = /lavfi\.scene_score=([\d.]+)/.exec(line)
+        if (mScore && cur) {
+          cur.score = Number(mScore[1])
+          list.push(cur)
+          cur = null
+        }
+      }
+      return list
+    }
+
+    // 阈值自适应：0.25 常常太严（画面缓慢变化时一个点都没有）
+    let usedThr = threshold
+    let candidates = []
+    for (const thr of [threshold, 0.15, 0.08, 0.04]) {
+      try {
+        candidates = await scan(thr)
+      } catch (err) {
+        return { ok: false, error: String((err && err.message) || err) }
+      }
+      usedThr = thr
+      if (candidates.length) break
+    }
+
+    // 按分数贪心 + 最小间隔
+    candidates.sort((a, b) => b.score - a.score)
+    const picked = []
+    for (const c of candidates) {
+      if (picked.length >= count) break
+      if (!Number.isFinite(c.time)) continue
+      if (dur && c.time > dur - 0.5) continue
+      if (picked.some((x) => Math.abs(x.time - c.time) < minGap)) continue
+      picked.push(c)
+    }
+    picked.sort((a, b) => a.time - b.time)
+    let segments = picked.map((c) => {
+      let start = Math.max(0, c.time - seconds / 2)
+      let end = Math.min(dur || c.time + seconds / 2, start + seconds)
+      start = Math.max(0, end - seconds)
+      return { start: Math.round(start * 100) / 100, end: Math.round(end * 100) / 100, score: Math.round(c.score * 1000) / 1000 }
+    })
+    // 一个变化点都没有（比如固定机位的纯画面）：退化成均分取样
+    let fallback = false
+    if (!segments.length && dur > seconds + 1) {
+      fallback = true
+      const n = Math.max(1, Math.min(count, Math.floor(dur / (seconds + 1))))
+      const span = dur - seconds
+      for (let i = 0; i < n; i++) {
+        const start = Math.round(((span * (i + 0.5)) / n) * 100) / 100
+        segments.push({ start, end: Math.round((start + seconds) * 100) / 100, score: 0 })
+      }
+    }
+    this.rlog('highlights analyzed', { file, threshold: usedThr, cands: candidates.length, picked: segments.length, fallback, ms: Date.now() - started })
+    return { ok: true, file, duration: dur, candidates: candidates.length, segments, seconds, threshold: usedThr, fallback }
+  }
+
+  /**
+   * 把选中的时间段抽出来拼成一个"精彩片段"文件（一次重编码）。
+   * @param {{file:string, segments:Array<{start:number,end:number}>, outDir?:string, encoder?:string,
+   *          taskId?:string, onProgress?:Function}} p
+   */
+  async extractHighlights(p = {}) {
+    const file = path.resolve(String(p.file || ''))
+    // 新写法：items 里每一项可以是"从 file 里切一段"（start/end），也可以是"整个本地文件"（file）
+    const rawItems = Array.isArray(p.items) && p.items.length ? p.items : null
+    const fromSegs = (Array.isArray(p.segments) ? p.segments : []).map((s) => ({ start: s.start, end: s.end }))
+    const items = []
+    for (const it of rawItems || fromSegs) {
+      const own = it && it.file ? path.resolve(String(it.file)) : ''
+      if (own) {
+        if (!fs.existsSync(own)) continue
+        const dur = (await this.probeDurationLoose(own)) || 0
+        if (!(dur > 0.2)) continue
+        const a = Math.max(0, Math.min(dur, Number(it.start) || 0))
+        const b = Math.max(0, Math.min(dur, Number(it.end) || dur))
+        if (b - a <= 0.2) continue
+        items.push({ file: own, start: a, end: b, whole: !(Number(it.start) > 0 || Number(it.end) > 0) })
+      } else {
+        const a = Math.max(0, Number(it && it.start) || 0)
+        const b = Math.max(0, Number(it && it.end) || 0)
+        if (b - a <= 0.2) continue
+        items.push({ file, start: a, end: b, whole: false })
+      }
+    }
+    if (!items.length) return { ok: false, error: '没有可用的片段' }
+    // 只用"本地片段文件"时不需要样片；有从样片切的段但样片不在，才报错
+    const needsSample = items.some((it) => it.file === file)
+    if (needsSample && !fs.existsSync(file)) return { ok: false, error: '样片文件不存在：' + file }
+    const segs = items
+    const encoder = p.encoder === 'nvenc' ? 'nvenc' : 'x264'
+    // 每个不同的源文件一个 -i 输入；片段既可以是"样片里切一段"，也可以是"整个本地片段文件"
+    const inputFiles = []
+    const idxOf = (f) => {
+      let i = inputFiles.indexOf(f)
+      if (i < 0) {
+        inputFiles.push(f)
+        i = inputFiles.length - 1
+      }
+      return i
+    }
+    for (const s of segs) s.inIdx = idxOf(s.file)
+    const firstExisting = inputFiles.find((f) => fs.existsSync(f)) || ''
+    if (!firstExisting) return { ok: false, error: '片段引用的文件都不在了' }
+    const probeInfo = (await this.probeVideoInfo(file)) || (await this.probeVideoInfo(firstExisting)) || { width: 1920, height: 1080, fps: 30 }
+    const W = Math.max(2, Math.round(probeInfo.width / 2) * 2)
+    const H = Math.max(2, Math.round(probeInfo.height / 2) * 2)
+    const fps = probeInfo.fps || 30
+    // 全部输入都有音轨才能拼出带声音的成片；有一个没有就退化成纯视频（日志里记一笔）
+    let hasAudio = true
+    for (const f of inputFiles) {
+      if (!(await this.probeHasAudio(f))) {
+        hasAudio = false
+        break
+      }
+    }
+    if (!hasAudio) this.rlog('highlight: some input has no audio -> video only', { inputs: inputFiles.map((f) => path.basename(f)) })
+    const onProgress = typeof p.onProgress === 'function' ? p.onProgress : null
+    const taskId = p.taskId || ''
+    const dir = p.outDir ? path.resolve(String(p.outDir)) : path.dirname(firstExisting)
+    const base = path.basename(fs.existsSync(file) ? file : firstExisting).replace(/\.[^.]+$/, '')
+    let out = path.join(dir, `${base}_精彩.mp4`)
+    if (fs.existsSync(out)) {
+      let k = 1
+      do {
+        out = path.join(dir, `${base}_精彩_${k}.mp4`)
+        k += 1
+      } while (fs.existsSync(out) && k < 50)
+    }
+    const total = segs.reduce((a, s) => a + (s.end - s.start), 0)
+    const scale = `scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=${fps},format=yuv420p`
+    const buildFilters = (withAudio) => {
+      const f = []
+      segs.forEach((s, i) => {
+        f.push(`[${s.inIdx}:v]trim=start=${s.start.toFixed(3)}:end=${s.end.toFixed(3)},setpts=PTS-STARTPTS,${scale}[v${i}]`)
+      })
+      f.push(`${segs.map((_, i) => `[v${i}]`).join('')}concat=n=${segs.length}:v=1:a=0[vout]`)
+      if (withAudio) {
+        segs.forEach((s, i) => {
+          f.push(
+            `[${s.inIdx}:a]atrim=start=${s.start.toFixed(3)}:end=${s.end.toFixed(3)},asetpts=PTS-STARTPTS,` +
+              `aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a${i}]`
+          )
+        })
+        f.push(`${segs.map((_, i) => `[a${i}]`).join('')}concat=n=${segs.length}:v=0:a=1[aout]`)
+      }
+      return f.join(';')
+    }
+    const runOnce = async (withAudio) => {
+      const args = ['-y']
+      for (const f of inputFiles) args.push('-i', f)
+      args.push('-filter_complex', buildFilters(withAudio), '-map', '[vout]')
+      if (withAudio) args.push('-map', '[aout]', '-c:a', 'aac', '-b:a', '192k')
+      args.push(...this.encoderArgs({ encoder }), '-movflags', '+faststart', out)
+      if (!onProgress) return this.runFfmpeg(args)
+      try {
+        onProgress({ taskId, kind: 'highlight', stage: 'render', pct: 0, outTime: 0, total, speed: '' })
+      } catch {}
+      return this.runFfmpegProgress(args, (st) => {
+        const pct = total > 0 ? Math.min(99.9, (st.outTime / total) * 100) : 0
+        try {
+          onProgress({ taskId, kind: 'highlight', stage: 'render', pct, outTime: st.outTime, total, speed: st.speed })
+        } catch {}
+      })
+    }
+    try {
+      if (hasAudio) {
+        try {
+          await runOnce(true)
+        } catch (err) {
+          this.rlog('highlight audio failed, retry video-only', { err: String((err && err.message) || err).slice(-200) })
+          await runOnce(false)
+        }
+      } else {
+        await runOnce(false)
+      }
+    } catch (err) {
+      return { ok: false, error: String((err && err.message) || err) }
+    }
+    let size = 0
+    try {
+      size = fs.statSync(out).size
+    } catch {}
+    this.rlog('highlight extracted', { file, out, segments: segs.length, size })
+    return { ok: true, out, size, segments: segs, duration: Math.round(total * 100) / 100, width: W, height: H, fps }
+  }
+
+  /* ------------------------------ 图片片头 ------------------------------ */
+
+  /**
+   * 合并导出：片头图（N 秒，可在图上叠字）+ 若干片段（各自裁好的 [start,end]）+ 背景音，一次编码出成片。
+   * @param {{image?:string, seconds?:number, items:Array<{file:string,start:number,end:number}>,
+   *          texts?:Array<{text:string,x:number,y:number,sizePct:number,color:string,opacity:number}>,
+   *          bgm?:{path:string,volume:number}, outDir?:string, encoder?:string, taskId?:string, onProgress?:Function}} p
+   */
+  async mergeExport(p = {}) {
+    const raw = Array.isArray(p.items) ? p.items : []
+    const items = []
+    for (const it of raw) {
+      const f = it && it.file ? path.resolve(String(it.file)) : ''
+      if (!f || !fs.existsSync(f)) continue
+      const dur = (await this.probeDurationLoose(f)) || 0
+      if (!(dur > 0.05)) continue
+      const a = Math.max(0, Math.min(dur, Number(it.start) || 0))
+      const b = Math.max(0, Math.min(dur, Number(it.end) || dur))
+      if (b - a <= 0.05) continue
+      items.push({
+        file: f,
+        start: a,
+        end: b,
+        dur: b - a,
+        // 这一段自己的原声音量（0–2，1 = 原样）；界面上每张卡片一根小滑杆
+        volume: Math.max(0, Math.min(2, Number.isFinite(Number(it.volume)) ? Number(it.volume) : 1)),
+        hasAudio: await this.probeHasAudio(f)
+      })
+    }
+    if (!items.length) return { ok: false, error: '没有可合并的片段' }
+
+    // 片头图（0 秒 / 没选图 = 不加片头）
+    const imgPath = p.image ? path.resolve(String(p.image)) : ''
+    const secondsRaw = Number(p.seconds)
+    const wantHead = imgPath && fs.existsSync(imgPath) && Number.isFinite(secondsRaw) && secondsRaw >= 0.2
+    const seconds = wantHead ? Math.max(0.2, Math.min(60, secondsRaw)) : 0
+
+    const bgmPath = p.bgm && p.bgm.path ? path.resolve(String(p.bgm.path)) : ''
+    const bgmVolRaw = p.bgm ? Number(p.bgm.volume) : NaN
+    const bgm = bgmPath && fs.existsSync(bgmPath) ? { path: bgmPath, volume: Math.max(0, Math.min(2, Number.isFinite(bgmVolRaw) ? bgmVolRaw : 0.3)) } : null
+
+    const encoder = p.encoder === 'nvenc' ? 'nvenc' : 'x264'
+    const onProgress = typeof p.onProgress === 'function' ? p.onProgress : null
+    const taskId = p.taskId || ''
+    // 片头图上叠的字（多条）：坐标是相对画面的 0..1（文字中心），sizePct = 字号占画面高的百分比
+    const texts = (Array.isArray(p.texts) ? p.texts : [])
+      .map((t) => ({
+        text: String((t && t.text) || ''),
+        x: Number(t && t.x),
+        y: Number(t && t.y),
+        sizePct: Number(t && t.sizePct),
+        color: String((t && t.color) || '#ffffff'),
+        font: String((t && t.font) || ''),
+        opacity: Number.isFinite(Number(t && t.opacity)) ? Number(t.opacity) : 1
+      }))
+      .filter((t) => t.text && t.text.trim())
+    const wantFont = p.font ? path.resolve(String(p.font)) : ''
+    const fontPath = (wantFont && fs.existsSync(wantFont) ? wantFont : '') || this.fontPath || findFont()
+
+    // 画面参数按第一个视频来（没有视频就只有图，理论上不会发生）
+    const info = (await this.probeVideoInfo(items[0].file)) || { width: 1920, height: 1080, fps: 30 }
+    const W = Math.max(2, Math.round(info.width / 2) * 2)
+    const H = Math.max(2, Math.round(info.height / 2) * 2)
+    const fps = info.fps || 30
+
+    const dir = p.outDir ? path.resolve(String(p.outDir)) : path.dirname(items[0].file)
+    try {
+      fs.mkdirSync(dir, { recursive: true })
+    } catch {}
+    const stamp = (() => {
+      const d = new Date()
+      const z = (n) => String(n).padStart(2, '0')
+      return `${d.getFullYear()}${z(d.getMonth() + 1)}${z(d.getDate())}-${z(d.getHours())}${z(d.getMinutes())}${z(d.getSeconds())}`
+    })()
+    let out = path.join(dir, `合并_${stamp}.mp4`)
+    if (fs.existsSync(out)) {
+      let k = 1
+      do {
+        out = path.join(dir, `合并_${stamp}_${k}.mp4`)
+        k += 1
+      } while (fs.existsSync(out) && k < 50)
+    }
+
+    const total = seconds + items.reduce((a, it) => a + it.dur, 0)
+    // 输入顺序：[0] 片头图（可选） → 各视频 → anullsrc → 背景音（可选）
+    const videoInputs = []
+    const idxOf = (f) => {
+      let i = videoInputs.indexOf(f)
+      if (i < 0) {
+        videoInputs.push(f)
+        i = videoInputs.length - 1
+      }
+      return i
+    }
+    const srcBase = wantHead ? 1 : 0
+    for (const it of items) it.inIdx = srcBase + idxOf(it.file)
+    const nullIdx = srcBase + videoInputs.length
+    const bgmIdx = bgm ? nullIdx + 1 : -1
+    const anyAudio = Boolean(bgm) || items.some((it) => it.hasAudio)
+
+    const scale = `scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=${fps},format=yuv420p`
+    const buildFilters = (withAudio) => {
+      const f = []
+      const vlabels = []
+      if (wantHead) {
+        // 片头图这一路：缩放补边 → 截 N 秒 →（可选）在图上叠若干条文字
+        let headLabel = 'vhead0'
+        f.push(`[0:v]${scale},trim=duration=${seconds.toFixed(3)},setpts=PTS-STARTPTS[${headLabel}]`)
+        if (texts.length) {
+          for (let i = 0; i < texts.length; i++) {
+            const t = texts[i]
+            const next = `vheadtx${i}`
+            const sizePct = Math.max(0.5, Math.min(40, Number(t.sizePct) || 6))
+            const hex = String(t.color || '#ffffff').replace('#', '')
+            const op = Math.max(0.05, Math.min(1, Number.isFinite(Number(t.opacity)) ? Number(t.opacity) : 1))
+            const fx = Math.max(0, Math.min(1, Number(t.x)))
+            const fy = Math.max(0, Math.min(1, Number(t.y)))
+            // 每条字可以有自己的字体文件；没有/不存在就退回全局那个
+            const tf = t.font ? path.resolve(t.font) : ''
+            const useFont = tf && fs.existsSync(tf) ? tf : fontPath
+            f.push(
+              `[${headLabel}]drawtext=fontfile='${this.escapeFilterText(useFont)}':text='${this.escapeFilterText(t.text)}'` +
+                `:fontcolor=0x${hex}@${op}:fontsize=h*${(sizePct / 100).toFixed(4)}` +
+                `:x='w*${fx.toFixed(4)}-text_w/2':y='h*${fy.toFixed(4)}-text_h/2'` +
+                `:shadowcolor=black@0.6:shadowx=3:shadowy=3[${next}]`
+            )
+            headLabel = next
+          }
+        }
+        if (headLabel !== 'vhead') f.push(`[${headLabel}]null[vhead]`)
+        vlabels.push('[vhead]')
+      }
+      items.forEach((it, i) => {
+        f.push(`[${it.inIdx}:v]trim=start=${it.start.toFixed(3)}:end=${it.end.toFixed(3)},setpts=PTS-STARTPTS,${scale}[v${i}]`)
+        vlabels.push(`[v${i}]`)
+      })
+      f.push(`${vlabels.join('')}concat=n=${vlabels.length}:v=1:a=0[vout]`)
+      if (withAudio) {
+        const alabels = []
+        if (wantHead) {
+          f.push(`[${nullIdx}:a]atrim=duration=${seconds.toFixed(3)},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[ahead]`)
+          alabels.push('[ahead]')
+        }
+        items.forEach((it, i) => {
+          // 每段自己的原声增益（1 = 原样；0.5 = 压一半；1.5 = 放大 1.5 倍）
+          const vol = Math.abs((Number(it.volume) || 1) - 1) > 0.001 ? `,volume=${(Number(it.volume) || 1).toFixed(3)}` : ''
+          if (it.hasAudio) {
+            f.push(
+              `[${it.inIdx}:a]atrim=start=${it.start.toFixed(3)}:end=${it.end.toFixed(3)},asetpts=PTS-STARTPTS,` +
+                `aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo${vol}[a${i}]`
+            )
+          } else {
+            f.push(
+              `[${nullIdx}:a]atrim=duration=${it.dur.toFixed(3)},asetpts=PTS-STARTPTS,` +
+                `aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo${vol}[a${i}]`
+            )
+          }
+          alabels.push(`[a${i}]`)
+        })
+        if (alabels.length > 1) f.push(`${alabels.join('')}concat=n=${alabels.length}:v=0:a=1[voice]`)
+        else f.push(`${alabels[0]}anull[voice]`)
+        if (bgm) {
+          f.push(
+            `[${bgmIdx}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,` +
+              `atrim=duration=${total.toFixed(3)},asetpts=PTS-STARTPTS,volume=${bgm.volume}[bg]`
+          )
+          f.push('[voice][bg]amix=inputs=2:normalize=0:duration=first[aout]')
+        } else {
+          f.push('[voice]anull[aout]')
+        }
+      }
+      return f.join(';')
+    }
+
+    const runOnce = async (withAudio) => {
+      const args = ['-y']
+      if (wantHead) args.push('-loop', '1', '-t', String(seconds), '-i', imgPath)
+      for (const f of videoInputs) args.push('-i', f)
+      // 没音轨的片段 / 片头那段要垫静音，用一条 lavfi 静音源按需 atrim
+      args.push('-f', 'lavfi', '-t', total.toFixed(3), '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000')
+      if (bgm) args.push('-stream_loop', '-1', '-i', bgm.path)
+      args.push('-filter_complex', buildFilters(withAudio), '-map', '[vout]')
+      if (withAudio) args.push('-map', '[aout]', '-c:a', 'aac', '-b:a', '192k')
+      args.push(...this.encoderArgs({ encoder }), '-movflags', '+faststart', out)
+      if (!onProgress) return this.runFfmpeg(args)
+      try {
+        onProgress({ taskId, kind: 'head', stage: 'render', pct: 0, outTime: 0, total, speed: '' })
+      } catch {}
+      return this.runFfmpegProgress(args, (st) => {
+        const pct = total > 0 ? Math.min(99.9, (st.outTime / total) * 100) : 0
+        try {
+          onProgress({ taskId, kind: 'head', stage: 'render', pct, outTime: st.outTime, total, speed: st.speed })
+        } catch {}
+      })
+    }
+
+    this.rlog('merge start', {
+      out,
+      items: items.map((it) => `${path.basename(it.file)}[${it.start.toFixed(2)}-${it.end.toFixed(2)}]`),
+      head: wantHead ? { image: path.basename(imgPath), seconds } : null,
+      texts: texts.map((t) => `${t.text}@${Number(t.x).toFixed(2)},${Number(t.y).toFixed(2)} x${t.sizePct}% ${t.color}`),
+      font: texts.length ? fontPath : '',
+      bgm: bgm ? { path: path.basename(bgm.path), volume: bgm.volume } : null,
+      audio: anyAudio,
+      W,
+      H,
+      fps,
+      total
+    })
+    try {
+      if (anyAudio) {
+        try {
+          await runOnce(true)
+        } catch (err) {
+          this.rlog('merge audio failed, retry video-only', { err: String((err && err.message) || err).slice(-300) })
+          await runOnce(false)
+        }
+      } else {
+        await runOnce(false)
+      }
+    } catch (err) {
+      return { ok: false, error: String((err && err.message) || err) }
+    }
+    let size = 0
+    try {
+      size = fs.statSync(out).size
+    } catch {}
+    this.rlog('merge done', { out, size, total })
+    return { ok: true, out, size, duration: Math.round(total * 100) / 100, width: W, height: H, fps, pieces: items.length, head: seconds }
+  }
+
+  /** 量视频的尺寸和帧率（做片头时要按原片的画面参数生成，否则 concat 会变形/掉帧） */
+  probeVideoInfo(file) {
+    return new Promise((resolve) => {
+      if (!this.ffprobe) return resolve(null)
+      const child = spawn(
+        this.ffprobe,
+        [
+          '-v',
+          'error',
+          '-select_streams',
+          'v:0',
+          '-show_entries',
+          'stream=width,height,avg_frame_rate,r_frame_rate',
+          '-of',
+          'default=nw=1',
+          file
+        ],
+        { windowsHide: true }
+      )
+      let out = ''
+      child.stdout.on('data', (d) => {
+        out += d.toString()
+      })
+      child.on('error', () => resolve(null))
+      child.on('close', () => {
+        const get = (k) => {
+          const m = new RegExp(`^${k}=(.*)$`, 'm').exec(out)
+          return m ? m[1].trim() : ''
+        }
+        const w = Number(get('width'))
+        const h = Number(get('height'))
+        const parseRate = (v) => {
+          const m = /^(\d+)\/(\d+)$/.exec(v)
+          if (m && Number(m[2]) > 0) {
+            const r = Number(m[1]) / Number(m[2])
+            if (Number.isFinite(r) && r > 1 && r < 121) return r
+          }
+          const n = Number(v)
+          return Number.isFinite(n) && n > 1 && n < 121 ? n : 0
+        }
+        let fps = parseRate(get('avg_frame_rate'))
+        if (!fps) fps = parseRate(get('r_frame_rate'))
+        if (!Number.isFinite(w) || !Number.isFinite(h) || !w || !h) return resolve(null)
+        resolve({ width: w, height: h, fps: fps || 30 })
+      })
+    })
+  }
+
+  /** 视频有没有音轨 */
+  probeHasAudio(file) {
+    return new Promise((resolve) => {
+      if (!this.ffprobe) return resolve(true)
+      const child = spawn(this.ffprobe, ['-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=index', '-of', 'csv=p=0', file], {
+        windowsHide: true
+      })
+      let out = ''
+      child.stdout.on('data', (d) => {
+        out += d.toString()
+      })
+      child.on('error', () => resolve(true))
+      child.on('close', () => resolve(out.trim().length > 0))
+    })
+  }
+
+  /**
+   * 给视频前面插 N 秒图片（片头）。
+   *
+   *   -loop 1 -t N -i 图片  +  -i 原片  +  anullsrc（N 秒静音）
+   *   → 图片等比缩放铺满原片分辨率（黑边补齐）→ concat 到原片前面
+   *   → 音频：[N 秒静音][原片音轨] concat，保证音画仍然对齐
+   *
+   * @param {{files:string[], image:string, seconds?:number, encoder?:string,
+   *          outDir?:string, taskId?:string, onProgress?:Function}} p
+   */
+  async prependImage(p = {}) {
+    const files = (Array.isArray(p.files) ? p.files : []).map((f) => path.resolve(String(f))).filter((f) => fs.existsSync(f))
+    if (!files.length) return { ok: false, error: '没有可处理的视频' }
+    const image = path.resolve(String(p.image || ''))
+    if (!fs.existsSync(image)) return { ok: false, error: '图片不存在：' + image }
+    const seconds = Math.max(0.2, Math.min(60, Number(p.seconds) || 2))
+    const encoder = p.encoder === 'nvenc' ? 'nvenc' : 'x264'
+    // 可选：中间插一段"精彩片段"、整体再垫一层背景音
+    const insPath = p.insert && p.insert.path ? path.resolve(String(p.insert.path)) : ''
+    const insert = insPath && fs.existsSync(insPath) ? { path: insPath, dur: (await this.probeDuration(insPath)) || 0 } : null
+    const bgmPath = p.bgm && p.bgm.path ? path.resolve(String(p.bgm.path)) : ''
+    const bgmVolRaw = p.bgm ? Number(p.bgm.volume) : NaN
+    const bgmVol = Math.max(0, Math.min(2, Number.isFinite(bgmVolRaw) ? bgmVolRaw : 0.3))
+    const bgm = bgmPath && fs.existsSync(bgmPath) ? { path: bgmPath, volume: bgmVol } : null
+    // 可选：正片只保留原片的某一段（粗剪后"只保留选区"）
+    const rs = Math.max(0, Number(p.rangeStart) || 0)
+    const re = Number(p.rangeEnd) || 0
+    const useRange = re - rs > 0.2
+    const onProgress = typeof p.onProgress === 'function' ? p.onProgress : null
+    const taskId = p.taskId || ''
+    const outputs = []
+    const failed = []
+    const started = Date.now()
+
+    for (let idx = 0; idx < files.length; idx++) {
+      const src = files[idx]
+      const dir = p.outDir ? path.resolve(String(p.outDir)) : path.dirname(src)
+      const base = path.basename(src).replace(/\.[^.]+$/, '')
+      let out = path.join(dir, `${base}_片头.mp4`)
+      if (fs.existsSync(out)) {
+        let k = 1
+        do {
+          out = path.join(dir, `${base}_片头_${k}.mp4`)
+          k += 1
+        } while (fs.existsSync(out) && k < 50)
+      }
+      const info = (await this.probeVideoInfo(src)) || { width: 1920, height: 1080, fps: 30 }
+      // 偶数尺寸：编码器要求
+      const W = Math.max(2, Math.round(info.width / 2) * 2)
+      const H = Math.max(2, Math.round(info.height / 2) * 2)
+      const fps = info.fps || 30
+      const hasAudio = await this.probeHasAudio(src)
+      const srcDur = (await this.probeDuration(src)) || 0
+      // 只保留选区：正片长度按选区算（选区超出片长就夹回来）
+      const rangeA = useRange ? Math.min(rs, Math.max(0, srcDur - 0.2)) : 0
+      const rangeB = useRange ? Math.min(srcDur || re, Math.max(rangeA + 0.2, re)) : srcDur
+      const bodyDur = useRange ? Math.max(0.2, rangeB - rangeA) : srcDur || 0
+      const insertDur = insert ? insert.dur : 0
+      const total = bodyDur + seconds + insertDur
+      const grand = total
+
+      const label = `${idx + 1}/${files.length} ${path.basename(src)}`
+      this.rlog('prepend start', { src, image, seconds, out, W, H, fps, hasAudio, insert: insert ? insert.path : '', bgm: bgm ? bgm.path : '' })
+
+      const scaleChain = (i) =>
+        `[${i}:v]scale=${W}:${H}:force_original_aspect_ratio=decrease,` +
+        `pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=${fps},format=yuv420p`
+      const bgmIdx = insert ? 4 : 3
+
+      const buildFilters = (withAudio) => {
+        const f = []
+        f.push(`${scaleChain(0)}[hv]`)
+        f.push(`${scaleChain(1)}[bv]`)
+        if (insert) f.push(`${scaleChain(3)}[iv]`)
+        f.push(insert ? '[hv][iv][bv]concat=n=3:v=1:a=0[vpre]' : '[hv][bv]concat=n=2:v=1:a=0[vpre]')
+        if (withAudio) {
+          f.push(
+            `[2:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,atrim=duration=${seconds},asetpts=PTS-STARTPTS[ha]`
+          )
+          f.push(`[1:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,asetpts=PTS-STARTPTS[ba]`)
+          if (insert) {
+            f.push(`[3:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,asetpts=PTS-STARTPTS[ia]`)
+            f.push('[ha][ia][ba]concat=n=3:v=0:a=1[voice]')
+          } else {
+            f.push('[ha][ba]concat=n=2:v=0:a=1[voice]')
+          }
+          if (bgm) {
+            f.push(
+              `[${bgmIdx}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,` +
+                `atrim=duration=${grand.toFixed(3)},asetpts=PTS-STARTPTS,volume=${bgm.volume}[bg]`
+            )
+            f.push('[voice][bg]amix=inputs=2:normalize=0:duration=first[aout]')
+          } else {
+            f.push('[voice]anull[aout]')
+          }
+        }
+        f.push('[vpre]null[vout]')
+        return f.join(';')
+      }
+
+      const runOnce = async (withAudio) => {
+        const args = [
+          '-y',
+          '-loop',
+          '1',
+          '-t',
+          String(seconds),
+          '-i',
+          image
+        ]
+        // 只保留选区时，把原片输入裁到 [rangeA, rangeB]（输入侧 -ss/-t，解码到准确位置）
+        if (useRange) args.push('-ss', rangeA.toFixed(3), '-t', bodyDur.toFixed(3))
+        args.push(
+          '-i',
+          src,
+          '-f',
+          'lavfi',
+          '-t',
+          String(seconds),
+          '-i',
+          'anullsrc=channel_layout=stereo:sample_rate=48000'
+        )
+        if (insert) args.push('-i', insert.path)
+        // 背景音可能比成片短：循环着喂，再用 atrim 截到成片长度
+        if (bgm) args.push('-stream_loop', '-1', '-i', bgm.path)
+        args.push('-filter_complex', buildFilters(withAudio), '-map', '[vout]')
+        if (withAudio) args.push('-map', '[aout]', '-c:a', 'aac', '-b:a', '192k')
+        args.push(...this.encoderArgs({ encoder }), '-movflags', '+faststart', out)
+        if (!onProgress) return this.runFfmpeg(args)
+        try {
+          onProgress({ taskId, kind: 'head', stage: 'render', pct: 0, outTime: 0, total, speed: '', label })
+        } catch {}
+        return this.runFfmpegProgress(args, (st) => {
+          // 多文件时整体进度 = (已完成 + 当前比例) / 总数
+          const one = total > 0 ? Math.max(0, Math.min(1, st.outTime / total)) : 0
+          const pct = Math.min(99.9, ((idx + one) / files.length) * 100)
+          try {
+            onProgress({ taskId, kind: 'head', stage: 'render', pct, outTime: st.outTime, total, speed: st.speed, label })
+          } catch {}
+        })
+      }
+
+      try {
+        if (hasAudio) {
+          try {
+            await runOnce(true)
+          } catch (err) {
+            this.rlog('prepend audio failed, retry video-only', { err: String((err && err.message) || err).slice(-200) })
+            await runOnce(false)
+          }
+        } else {
+          await runOnce(false)
+        }
+        let size = 0
+        try {
+          size = fs.statSync(out).size
+        } catch {}
+        outputs.push({
+          src,
+          out,
+          size,
+          seconds,
+          width: W,
+          height: H,
+          fps,
+          hasAudio,
+          insert: insert ? insert.path : '',
+          insertDur: Math.round(insertDur * 100) / 100,
+          bgm: bgm ? bgm.path : '',
+          keepRange: useRange ? { start: Math.round(rangeA * 100) / 100, end: Math.round(rangeB * 100) / 100 } : null
+        })
+      } catch (err) {
+        failed.push({ src, error: String((err && err.message) || err) })
+      }
+    }
+
+    const ms = Date.now() - started
+    this.rlog('prepend done', { count: outputs.length, failed: failed.length, ms })
+    if (onProgress) {
+      try {
+        onProgress({ taskId, kind: 'head', stage: 'done', pct: failed.length ? Math.round((outputs.length / files.length) * 100) : 100 })
+      } catch {}
+    }
+    if (!outputs.length) return { ok: false, error: failed[0] ? failed[0].error : '全部失败', failed }
+    return { ok: true, outputs, failed, ms, seconds }
   }
 
   /* ------------------------------ 水印 ------------------------------ */
@@ -2032,6 +3599,8 @@ class RecorderManager {
     for (const act of [...this.actives.values()]) {
       if (act.mode === 'stream') {
         clearTimeout(act.maxTimer)
+        // 标成"正在停"：不然 ffmpeg 正常退出会被当成"流断了"，还会计划 3 秒后自动续录
+        act.stopping = true
         waits.push(
           new Promise((resolve) => {
             let done = false
@@ -2065,7 +3634,18 @@ class RecorderManager {
       this.rlog('dispose waiting for active recordings', { count: waits.length })
       await Promise.all(waits)
     }
-    // 没来得及合并的分段留着，下次启动 recoverOrphans() 会接走
+    // 退出时直接把这一场收尾（合并成 mp4）：不然每次带着录制退出都会留一堆 part，
+    // 得等下次启动的 recoverOrphans 才补，用户会以为"录的东西不见了"。
+    for (const act of [...this.actives.values()]) {
+      if (act.mode !== 'stream') continue
+      try {
+        this.rlog('dispose finalize session', { dir: act.dir })
+        await this.finalizeSession(act, {})
+      } catch (err) {
+        this.rlog('dispose finalize failed', { dir: act.dir, err: err && err.message })
+      }
+    }
+    // 实在来不及合并的（finalizeSession 失败）分段留着，下次启动 recoverOrphans() 会接走
     for (const act of this.actives.values()) {
       if (act.mode === 'stream') {
         const parts = this.listParts(act.dir)

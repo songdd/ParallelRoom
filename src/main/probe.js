@@ -13,7 +13,7 @@
  *  - 独立的 partition，不带登录态，避免探测行为影响账号的“当前直播间”
  */
 
-const { BrowserWindow, session } = require('electron')
+const { BrowserWindow, session, net } = require('electron')
 
 const PROBE_PARTITION = 'persist:probe'
 const MEDIA_RE = /\.(flv|m3u8|ts|mp4|m4s|m4v|webm)(\?|#|$)/i
@@ -262,7 +262,65 @@ class ProbeManager {
     }
   }
 
+  /**
+   * 斗鱼：不用开页面，接口就给了状态。
+   *
+   * `https://www.douyu.com/betard/<房间号>` 是房间页首屏就调的那个接口，返回 JSON：
+   *   room.show_status = 1 → 在播，0/2 → 未开播；顺便带 room_name / nickname / avatar。
+   * 实测（2026-11-18，房间 12894332）：507ms、97KB，`show_status:1`、`nickname:"米尔Miru"`。
+   *
+   * 为什么优先用接口：斗鱼房间页很重（播放器 + 弹幕 + 推荐位），开一次页面要好几秒；
+   * 接口几百毫秒就能拿到结论。接口失败（改版 / 被拦）再退回原来的页面探测，行为不变。
+   */
+  async probeDouyuApi(url) {
+    const rid = (String(url || '').match(/douyu\.com\/(\d{3,})/) || [])[1]
+    if (!rid) return null
+    const started = Date.now()
+    try {
+      const ctl = new AbortController()
+      const timer = setTimeout(() => ctl.abort(), 8000)
+      const res = await net.fetch(`https://www.douyu.com/betard/${rid}`, {
+        signal: ctl.signal,
+        headers: { 'user-agent': UA, referer: 'https://www.douyu.com/' }
+      })
+      clearTimeout(timer)
+      if (!res.ok) {
+        this.log('douyu api http', rid, res.status)
+        return null
+      }
+      const j = await res.json().catch(() => null)
+      const room = j && j.room
+      if (!room) {
+        this.log('douyu api no room field', rid)
+        return null
+      }
+      const live = String(room.show_status) === '1' || String(room.status) === '1'
+      const avatar = room.avatar && (room.avatar.big || room.avatar.middle || room.avatar.small)
+      const out = {
+        status: live ? 'live' : 'offline',
+        name: String(room.nickname || '').slice(0, 60),
+        title: String(room.room_name || '').slice(0, 120),
+        cover: String(avatar || room.owner_avatar || ''),
+        online: '',
+        vw: 0,
+        vh: 0,
+        sample: 'douyu-api',
+        ms: Date.now() - started
+      }
+      this.log('douyu api probe', rid, out.status, out.name, `${out.ms}ms`)
+      return out
+    } catch (err) {
+      this.log('douyu api failed', rid, err && err.message)
+      return null
+    }
+  }
+
   async probeOne(url) {
+    // 斗鱼先试接口；拿到就结束，省掉一次整页加载
+    if (/douyu\.com/i.test(String(url || ''))) {
+      const fast = await this.probeDouyuApi(url)
+      if (fast) return fast
+    }
     const win = this.ensureWindow()
     const started = Date.now()
     let settled = false

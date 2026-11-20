@@ -13,12 +13,16 @@
     <header id="bar">
       <div class="brand">Parallel<span>Room</span></div>
       <div id="tabs">
+        <button class="tab tab-action" id="btn-login-menu" type="button" title="登录帐号：抖音 / 虎牙 都在这一个菜单里（扫码一次，所有房间共用登录态）">登录帐号 ▾</button>
+        <div class="tab-sep" aria-hidden="true"></div>
         <button class="tab" type="button" data-tab="monitor">监控</button>
         <button class="tab active" type="button" data-tab="watch">观看</button>
         <button class="tab" type="button" data-tab="edit">剪辑</button>
         <button class="tab" type="button" data-tab="debug" title="调试：看每个房间占用了哪些页面/进程/音源，关闭后有没有真的释放">调试</button>
+        <button class="tab" type="button" data-tab="about" title="关于 ParallelRoom：开发者、版本、功能一览">关于</button>
       </div>
       <div class="spacer"></div>
+      <button id="tasks-pill" class="ghost hidden" type="button" title="有任务在跑，点这里去剪辑页看进度">⏳ 0</button>
       <div id="status"></div>
       <div id="count">0 个房间</div>
       <button id="btn-hide-bar" class="ghost bar-collapse" type="button" title="隐藏顶部工具栏（鼠标点顶部小箭头可再展开）">▴</button>
@@ -30,11 +34,15 @@
     <main id="view-watch" class="view">
       <div class="row">
         <form id="add-form" autocomplete="off">
-          <input id="add-input" type="text" placeholder="直播间号，或 https://live.douyin.com/123456" spellcheck="false" />
+          <input id="add-input" type="text" placeholder="直播间号，或 https://live.douyin.com/123456，或任意网页地址" spellcheck="false" />
           <button id="add-btn" type="submit" class="primary">添加</button>
         </form>
 
         <div class="tools">
+          <button id="btn-open-local" class="ghost" type="button" title="打开本地的音视频文件（mp4 / webm / mov / mp3 / m4a / wav / flac…），会像直播间一样开成一个瓦片：能进网格、能进聚焦布局、能拖动排序、能单独调音量">本地文件</button>
+          <button id="btn-camera" class="ghost" type="button" title="把摄像头当成一个瓦片：可选设备、可同时开麦克风。默认静音（避免啸叫），点 🔊 可以听">摄像头</button>
+          <button id="btn-studio" class="ghost" type="button" title="虚拟演播室：摄像头绿幕抠像 + 三维场景合成（演播厅 / 户外 / 科幻），可调机位、抠像、光影匹配">虚拟演播室</button>
+          <button id="btn-stage" class="ghost" type="button" title="虚拟人舞台（全 CG）：程序化 3D 角色 + 霓虹/樱花/赛博三个舞台 + 6 个机位实时切换 + 泛光暗角调色。不需要摄像头">虚拟人舞台</button>
           <label class="quality-wrap" title="每屏显示几个瓦片。超出的部分用滚动条往下看。">
             <span>布局</span>
             <select id="grid-select">
@@ -60,19 +68,10 @@
               <option value="">不干预</option>
             </select>
           </label>
-          <button id="btn-login" class="ghost" type="button" title="打开抖音登录窗口，扫码一次即可对全部房间生效">登录抖音</button>
-          <button id="btn-login-huya" class="ghost" type="button" title="打开虎牙登录窗口（www.huya.com 扫码）；登录后虎牙房间可能解锁更高画质">登录虎牙</button>
           <button id="btn-mute-all" class="ghost" type="button" title="所有房间静音">全静音</button>
           <button id="btn-unmute-all" class="ghost" type="button" title="所有房间都出声">全出声</button>
           <button id="btn-reload-all" class="ghost" type="button" title="重新加载全部房间">重载</button>
-          <button id="btn-pure" class="ghost on" type="button" title="只留视频：藏掉抖音自己的侧栏、飘屏弹幕、礼物栏、页头。">
-            只看画面：开
-          </button>
-          <button id="btn-danmu" class="ghost" type="button" title="自渲染的弹幕面板（默认关：只留画面；想看聊天再打开）">
-            弹幕面板：关
-          </button>
-          <button id="btn-danmu-set" class="ghost" type="button" title="弹幕面板设置：显示几行、字号、贴哪个角">弹幕设置</button>
-          <button id="btn-gift" class="ghost" type="button" title="弹幕面板里是否显示礼物信息（默认关）。">礼物：关</button>
+          <button id="btn-view-options" class="ghost on" type="button" title="直播视频选项：只看画面（纯净模式）/ 弹幕面板 / 礼物 / 弹幕面板的行数、字号、贴哪个角">直播视频选项 ▾</button>
           <button id="btn-rec-options" class="ghost" type="button" title="录制选项：录制目录 / 分段时长 / 录完自动合并 / 最长时长 / 磁盘保护">⚙ 录制选项</button>
           <button id="btn-rec-stop-all" class="ghost danger" type="button" title="停止全部正在进行的录制">停止录制</button>
           <button id="btn-help" class="ghost" type="button" title="快捷键和用法一览（F1 或 ? 也可以打开）">? 快捷键</button>
@@ -85,7 +84,7 @@
       <div id="grid">
         <div id="empty">
           <h2>还没有房间</h2>
-          <p>粘贴抖音直播间号或 <code>live.douyin.com/数字</code> 链接后点「添加」。</p>
+          <p>粘贴抖音直播间号、<code>live.douyin.com/数字</code>、<code>www.huya.com/主播名</code>，或任意网页地址（优酷/B站视频页）后点「添加」。</p>
           <p class="hint">
             想先看谁在播？切到上方「监控」，把直播间地址加进去，探测到开播后再一键打开。
           </p>
@@ -114,7 +113,7 @@
             spellcheck="false"
             autocomplete="off"
           />
-          <label class="quality-wrap" title="卡片排列顺序。默认按添加顺序固定不动，选「在播优先」会随状态变化重排。">
+          <label class="quality-wrap" title="卡片排列顺序。★ 特别关注永远排在最前面，剩下的按这里选的方式排。默认「添加顺序」固定不动，选「在播优先」会随状态变化重排。">
             <span>排序</span>
             <select id="mon-sort">
               <option value="added" selected>添加顺序</option>
@@ -155,6 +154,39 @@
 
   <div id="fs-hint">F11 / Esc 退出全屏　·　鼠标移到屏幕顶部停一下可唤出工具栏</div>
   <div id="top-hotspot"></div>
+
+  <!-- 全屏时的小窗精彩片段：右侧/底部停靠，能播、能裁左右两端再另存 -->
+  <button id="fsc-fab" class="hidden" type="button" title="精彩片段小窗（也可以按 F8）">⟲ 精彩小窗</button>
+  <aside id="fsc" class="fsc right hidden">
+    <header class="fsc-head">
+      <span class="fsc-title">精彩片段</span>
+      <span id="fsc-dir" class="fsc-dir"></span>
+      <button id="fsc-sound" class="fsc-btn" type="button" title="小窗播放的声音开关">🔊 有声音</button>
+      <button id="fsc-pos" class="fsc-btn" type="button" title="换位置：右侧 / 底部">⇥ 右侧</button>
+      <button id="fsc-refresh" class="fsc-btn" type="button" title="重新读这一场的目录">⟳</button>
+      <button id="fsc-close" class="fsc-btn" type="button" title="收起（F8 再打开）">✕</button>
+    </header>
+    <div class="fsc-body">
+      <div id="fsc-list" class="fsc-list"></div>
+    </div>
+    <footer class="fsc-foot">
+      <div class="fsc-times">
+        <span class="fsc-lbl">起点</span><span id="fsc-tin">0:00.0</span>
+        <span class="fsc-lbl">中间</span><span id="fsc-tcur">0:00.0</span>
+        <span class="fsc-lbl">终点</span><span id="fsc-tout">0:00.0</span>
+        <span id="fsc-len" class="fsc-len"></span>
+      </div>
+      <div class="fsc-acts">
+        <button id="fsc-setin" class="fsc-act" type="button" title="把当前播放点设为起点（快捷键 [ 或 1）">⟦ 起点 = 播放点</button>
+        <button id="fsc-setout" class="fsc-act" type="button" title="把当前播放点设为终点（快捷键 ] 或 2）">终点 = 播放点 ⟧</button>
+        <button id="fsc-reset" class="fsc-act" type="button" title="左右两端恢复成整段">↺ 全片</button>
+        <button id="fsc-save" class="fsc-act primary" type="button" title="按当前左右两端另存一个新片段，原片段不动">✓ 另存精修</button>
+        <button id="fsc-over" class="fsc-act danger" type="button" title="按当前左右两端裁剪，并直接替换掉这个片段（不可撤销）">⤓ 覆盖原文件</button>
+      </div>
+      <div id="fsc-hint" class="fsc-hint"></div>
+    </footer>
+  </aside>
+
   <!-- 整窗录制时给窗口加一圈明显的边框（贴边，不会被录进画面：录制裁的是各瓦片的视频区） -->
   <div id="win-rec-frame" class="hidden">
     <span id="win-rec-label" class="pos-top">● 正在录制整个窗口</span>
@@ -246,6 +278,7 @@
         <button id="edit-open-dir" class="ghost" type="button">打开目录</button>
       </div>
       <div class="spacer"></div>
+      <button id="tasks-open" class="ghost" type="button" title="剪辑页的任务（拼接 / 片头 / 合并 / 加水印）：在跑的和跑完的都在这">⏳ 任务</button>
       <div id="edit-sel-info">已选 0</div>
     </div>
 
@@ -256,24 +289,289 @@
           <label class="modal-check" title="选中当前目录下的全部视频文件（含各子目录里的分段）"><input id="edit-sel-all" type="checkbox" /> 全选全部</label>
         </div>
         <div id="edit-files" class="edit-files"></div>
-        <div class="edit-actions">
-          <input id="edit-out-name" type="text" placeholder="输出文件名（留空自动生成）" spellcheck="false" />
-          <label class="modal-check" title="勾上之后「合并」会边合并边把水印烧进去，只解码重编码一次；不勾就是纯封装（几秒钟，无水印）。">
-            <input id="edit-merge-wm" type="checkbox" /> 合并时一起加水印
-          </label>
-          <button id="edit-merge" class="primary" type="button" disabled title="按修改时间从早到晚拼接（列表里的 #1 #2 #3 就是拼接顺序）">合并选中</button>
-          <button id="edit-apply-wm" class="primary" type="button" disabled>单独加水印</button>
-        </div>
         <p class="modal-hint" id="edit-status"></p>
       </section>
 
-      <section class="edit-pane edit-wm-pane">
-        <div class="edit-pane-head">
-          <h3>水印设置</h3>
-          <button id="edit-wm-reset" class="ghost" type="button">重置</button>
+      <div id="edit-splitter" class="edit-splitter" title="拖动调整左右宽度；双击复位"><i></i></div>
+
+      <section class="edit-pane edit-mosaic-pane">
+        <div class="right-tabs" id="edit-right-tabs">
+          <button class="rtab active" type="button" data-rpane="mosaic">多窗口拼接</button>
+          <button class="rtab" type="button" data-rpane="head" title="左边勾几个视频 → 一键加进片段列表 → 逐段裁两端 → 合并成一条（可加片头图片 N 秒 / 背景音）">图片片头 · 视频合并</button>
+          <button class="rtab" type="button" data-rpane="wm" title="水印的全部参数（类型 / 文字 / 字体 / 颜色 / 位置 / 漂移 / 编码器 / 时间范围）+ 给左边勾选的文件加水印">水印</button>
         </div>
 
-        <div class="wm-grid">
+        <div id="rpane-mosaic" class="rpane">
+        <div class="edit-pane-head">
+          <h3>多窗口拼接（几路录播拼成一张画面）</h3>
+          <button id="mo-clear" class="ghost" type="button" title="清空已选的源">清空</button>
+          <button id="mo-fs2" class="ghost" type="button" title="全屏看拼接（和预览右上角那个按钮一样）">⛶ 全屏</button>
+        </div>
+        <p class="modal-hint">
+          左边「视频文件」里勾 2~6 个，点下面「加进拼接」。每路都能<b>单独播放</b>（▶ 那一路自己播）、<b>单独拖进度</b>，还有<b>音量</b>和<b>延迟</b>；拿不准延迟就先各自拖到同一个画面，点「标定」，再点「⌖ 按标定对齐」，系统会把各路的延迟差算出来。
+        </p>
+        <div class="mo-toolbar">
+          <button id="mo-add" class="primary" type="button" title="把左边勾选的视频加进拼接（按勾选顺序）">← 加进拼接</button>
+          <label class="quality-wrap" title="格子排布：2×2 = 四个格子；2×1 = 左右两块；3×2 = 六个格子">
+            <span>布局</span>
+            <select id="mo-layout">
+              <option value="2x2" selected>2 × 2</option>
+              <option value="2x1">2 × 1（左右）</option>
+              <option value="1x2">1 × 2（上下）</option>
+              <option value="3x2">3 × 2</option>
+              <option value="3x3">3 × 3</option>
+            </select>
+          </label>
+          <label class="quality-wrap" title="导出分辨率（总画面）">
+            <span>分辨率</span>
+            <select id="mo-size">
+              <option value="1280">1280 宽</option>
+              <option value="1920" selected>1920 宽</option>
+              <option value="2560">2560 宽</option>
+            </select>
+          </label>
+          <label class="bar-check" title="用显卡 NVENC 编码（快一倍左右）">
+            <input id="mo-nvenc" type="checkbox" /> 硬件编码
+          </label>
+          <button id="mo-align" class="ghost" type="button" title="看每路标定、算出延迟/砍头，并列出「每个窗口在自己文件里从几秒播到几秒、在成片里占哪一段」">⌖ 分析标定</button>
+          <button id="mo-clear-marks" class="ghost" type="button" title="清掉所有标定时刻（不动延迟）">清标定</button>
+          <label class="bar-check" title="勾上后：预览从「共同起点」播到「共同终点」自动停，导出也只出这一段（不会出现某一路还没开始的黑格）">
+            <input id="mo-range-only" type="checkbox" checked /> 只用对齐区间
+          </label>
+          <label class="bar-check" title="勾上后：每路直接从自己的「标定」处起播（标定帧就是成片的 0 秒，前面那段素材被砍掉），标定点在四条时间轴上并不同时不代表在同一时刻——不勾则保留完整素材、用延迟把标定帧挪到同一个时刻">
+            <input id="mo-from-mark" type="checkbox" /> 从标定点开始
+          </label>
+        </div>
+        <div id="mo-sources" class="mo-sources"></div>
+        <div id="mo-analysis" class="mo-analysis hidden"></div>
+        <div class="mo-preview-wrap">
+          <div class="mo-preview-head">
+            <button id="mo-play" class="ghost" type="button">▶ 预览</button>
+            <button id="mo-jump-start" class="ghost" type="button" title="回到起始位置（共同区间的开头；没算区间就是 0）——快捷键 Home">⏮ 回起始</button>
+            <button id="mo-jump-end" class="ghost" type="button" title="跳到结束位置（共同区间的结尾；没算区间就是片尾）——快捷键 End">⏭ 到结尾</button>
+            <span id="mo-time" class="mo-time">0:00 / 0:00</span>
+            <span class="spacer"></span>
+            <button id="mo-align2" class="ghost" type="button" title="和工具栏里的「⌖ 分析标定」是同一个按钮（全屏时也能用）">⌖ 分析标定</button>
+            <button id="mo-fs" class="ghost" type="button" title="全屏看拼接预览（Esc 或再点一次退出）；全屏下每个小窗口顶部有自己的播放/进度条/标定">⛶ 全屏</button>
+            <button id="mo-render" class="primary" type="button" disabled>导出拼接视频</button>
+          </div>
+          <div class="mo-seekrow">
+            <div class="mo-seektrack">
+              <input id="mo-seek" class="mo-seek" type="range" min="0" max="1000" value="0" step="1" title="拖动预览进度（整条宽度，方便精确定位）" />
+              <span id="mo-range" class="mo-range hidden" title="对齐区间：所有窗口都有画面的那一段"></span>
+            </div>
+          </div>
+          <p class="mo-range-hint hidden" id="mo-range-hint"></p>
+          <div class="mo-canvas-host">
+            <canvas id="mo-canvas" class="mo-canvas" width="960" height="540"></canvas>
+            <div id="mo-cellbars" class="mo-cellbars"></div>
+          </div>
+          <p class="modal-hint" id="mo-status"></p>
+          <div id="mo-progress" class="mo-progress hidden">
+            <div class="mo-progress-bar"><i id="mo-progress-fill"></i></div>
+            <span id="mo-progress-text" class="mo-progress-text"></span>
+          </div>
+        </div>
+        </div><!-- /rpane-mosaic -->
+
+        <div id="rpane-head" class="rpane hidden">
+          <div class="edit-pane-head">
+            <h3>图片片头 · 视频合并（多段合并 + 片头 N 秒图片 + 背景音）</h3>
+            <span class="spacer"></span>
+            <span id="head-status" class="modal-hint"></span>
+            <button id="head-apply" class="primary" type="button" disabled title="把下面的片段按顺序合并成一条：片头图 N 秒 + 各片段（含裁剪）+ 背景音，一次编码">合并导出</button>
+          </div>
+          <div id="head-progress" class="mo-progress hidden">
+            <div class="mo-progress-bar"><i id="head-progress-fill"></i></div>
+            <span id="head-progress-text" class="mo-progress-text"></span>
+          </div>
+          <p class="modal-hint">
+            <b>合并：</b>左边「视频文件」勾几个 → 下面点 <b>「← 加入勾选的视频」</b>（按文件名时间戳自动排序）→ 卡片上拖三根把手裁两端（或点 ✎ 全屏细剪）→ 右上角 <b>合并导出</b>。
+            片头图会给成片最前面加 N 秒（秒数填 0 就是纯合并），背景音循环垫在整条成片下面。
+          </p>
+          <div class="head-row">
+            <span class="head-lab">片头图</span>
+            <input id="head-image" type="text" readonly placeholder="可选：png / jpg（PNG 支持透明，透明处会变黑）" spellcheck="false" />
+            <button id="head-pick" class="ghost" type="button">选择</button>
+            <button id="head-img-recent" class="ghost" type="button" title="用过的片头图（点一下直接换成它）">▾ 记录</button>
+            <button id="head-clear-img" class="ghost" type="button">清除</button>
+          </div>
+          <div class="head-row">
+            <span class="head-lab">图片文字</span>
+            <button id="head-text-add" class="ghost" type="button" title="在片头图上加一条字（加完直接进文字编辑界面改内容 / 字体 / 字号 / 颜色 / 位置）">＋ 加字</button>
+            <button id="head-text-open" class="primary" type="button" title="打开文字编辑界面：多条文字、换字体 / 字号 / 颜色 / 位置，鼠标拖右下角小方块缩放字号，拖动时有中线吸附">🎨 文字编辑…</button>
+            <span id="head-text-count" class="head-unit">0 条</span>
+            <span class="modal-hint">（只加在片头图那 N 秒上）</span>
+          </div>
+          <div class="head-row">
+            <span class="head-lab">时长</span>
+            <input id="head-sec" type="number" min="0" max="60" step="0.5" value="2" />
+            <span class="head-unit">秒（0 = 不加片头）</span>
+            <label class="bar-check" title="用显卡 NVENC 编码（快一些）">
+              <input id="head-nvenc" type="checkbox" /> 硬件编码
+            </label>
+          </div>
+          <div class="head-row">
+            <span class="head-lab">背景音</span>
+            <input id="head-bgm" type="text" readonly placeholder="可选：mp3 / m4a / wav（循环垫在整条成片下面）" spellcheck="false" />
+            <button id="head-bgm-pick" class="ghost" type="button">选择</button>
+            <button id="head-bgm-recent" class="ghost" type="button" title="用过的背景音（点一下直接换成它）">▾ 记录</button>
+            <button id="head-bgm-clear" class="ghost" type="button">清除</button>
+            <span class="head-unit">音量</span>
+            <input id="head-bgm-vol" type="range" min="0" max="100" step="5" value="30" title="背景音音量 0–100%" />
+            <b id="head-bgm-volval" class="head-unit">30%</b>
+          </div>
+
+
+          <!-- 上：要合并的片段（直接铺在合成预览上面，横向一排） -->
+          <div class="head-clips" id="head-clips">
+            <div class="head-clips-head">
+              <strong>要合并的片段（从左到右就是成片顺序）</strong>
+              <span class="spacer"></span>
+              <button id="hl-add-picked" class="primary" type="button" title="把左边「视频文件」里勾选的视频整段加进列表（可多选；加进来后按文件名里的时间戳自动排序，每段都能在卡片上裁）">← 加入勾选的视频</button>
+              <button id="hl-all-on" class="ghost" type="button" title="把所有片段重新设成「参与合成」（取消某段卡片左上角的勾就是不合成它）">☑ 全部参与</button>
+              <button id="hl-sort-stamp" class="ghost" type="button" title="按文件名里的时间戳（如 _20261115-235712）从小到大重排">⇅ 按时间戳排序</button>
+              <button id="hl-pick-files" class="ghost" type="button" title="从本地磁盘选视频/片段文件加进列表（可多选；整段先入列，之后可以在卡片上裁）">📂 加本地片段</button>
+              <button id="hl-mini-full" class="ghost" type="button" title="把选中的片段放到全屏里细剪（拖左右两端）">⛶ 全屏细剪</button>
+              <button id="hl-clear" class="ghost" type="button" title="把「要合并的片段」列表清空（只清列表，不动磁盘上的文件）">🗑 清空</button>
+            </div>
+            <p class="modal-hint hl-count-line" id="hl-count-hint">还没有片段：左边勾几个视频，点「← 加入勾选的视频」合并</p>
+            <div id="hl-list" class="hl-list"></div>
+            <p class="modal-hint" id="head-hl-status"></p>
+          </div>
+
+          <!-- 下：合成预览（片头 → 合并片段） -->
+          <div class="head-side" id="head-side-comp">
+            <div class="head-side-title">
+              <span title="合成预览（片头 → 合并片段），只是看效果，不生成文件">合成预览（片头 → 合并片段）</span>
+              <span class="spacer"></span>
+              <button id="head-prev-fs" class="ghost head-title-btn" type="button" title="全屏看合成预览（Esc 退出）">⛶ 全屏</button>
+            </div>
+            <div class="head-row head-side-bar">
+              <button id="head-prev-play" class="ghost" type="button" title="播放合成效果（不生成文件；没选图片时片头那段显示黑场）">▶ 预览</button>
+              <div id="head-track" class="head-track">
+                <input id="head-prev-seek" class="mo-seek" type="range" min="0" max="1000" value="0" step="1" title="拖动看片头 / 各片段" />
+                <div id="head-zone-head" class="head-zone head-zone-head"></div>
+                <div id="head-zone-hl" class="head-zone head-zone-hl"></div>
+              </div>
+              <span id="head-prev-time" class="mo-time">0:00 / 0:00</span>
+              <span id="head-prev-note" class="head-prev-note" title="预览 / 导出的提示都写在这里"></span>
+            </div>
+            <div class="mo-canvas-host head-canvas-host">
+              <canvas id="head-canvas" class="mo-canvas" width="640" height="360"></canvas>
+            </div>
+          </div>
+
+          <p class="modal-hint" id="head-keys-hint">
+            键盘：<kbd>Space</kbd> 播放 / 暂停预览 · <kbd>←</kbd><kbd>→</kbd> 播放位置 −1s / +1s（<kbd>Shift</kbd> 5s） · 全屏细剪里：<kbd>[</kbd> / <kbd>]</kbd> 把当前播放点设成起点 / 终点，<kbd>=</kbd> <kbd>-</kbd> <kbd>0</kbd> 缩放进度条，<kbd>Esc</kbd> 取消。
+          </p>
+
+<!-- 全屏细剪（拖左右两端） -->
+          <div id="hl-trim" class="hl-trim hidden">
+            <div class="hl-trim-head">
+              <span id="hl-trim-title">细剪</span>
+              <span class="spacer"></span>
+              <button id="hl-trim-play" class="ghost" type="button" title="播放选区">▶ 播放</button>
+              <button id="hl-trim-in" class="ghost" type="button" title="把当前位置设为起点">⟦ 起点</button>
+              <button id="hl-trim-out" class="ghost" type="button" title="把当前位置设为终点">终点 ⟧</button>
+              <button id="hl-trim-save" class="primary" type="button" title="保存这个片段的起止时间">✓ 保存</button>
+              <button id="hl-trim-close" class="ghost" type="button" title="取消（Esc）">✕</button>
+            </div>
+            <div class="hl-trim-canvas-host">
+              <canvas id="hl-trim-canvas" width="1280" height="720"></canvas>
+            </div>
+            <div class="hl-trim-bar">
+              <div id="hl-trim-track" class="head-track" title="滚轮缩放（把这一段放大再细调）· 双击回到整条原片">
+                <input id="hl-trim-seek" class="mo-seek" type="range" min="0" max="1000" value="0" step="1" title="拖动看这一段的画面" />
+                <div id="hl-trim-band" class="head-band"></div>
+                <div id="hl-trim-hin" class="head-handle head-handle-in" title="起点（拖动细调）"></div>
+                <div id="hl-trim-hout" class="head-handle head-handle-out" title="终点（拖动细调）"></div>
+              </div>
+              <span id="hl-trim-zoom" class="head-zoom-badge" title="进度条缩放：默认只铺开这一段（左右各留 50% 余量），点一下回到整条原片">×1</span>
+              <span id="hl-trim-span" class="mo-time">0:00–0:00（0.0s）</span>
+            </div>
+            <p class="modal-hint" id="hl-trim-hint">拖左右两个把手细调两端，或先用 ▶ 播放、到位置点「⟦ 起点 / 终点 ⟧」；进度条默认只铺开这一段（滚轮能继续放大），满意点「✓ 保存」。</p>
+          </div>
+
+          <!-- 图片文字：单独的编辑界面（换字体 / 字号 / 颜色 / 位置，鼠标拖动缩放） -->
+          <div id="hl-text" class="hl-trim hl-text-editor hidden">
+            <div class="hl-trim-head">
+              <span id="hl-text-title">图片文字</span>
+              <span class="spacer"></span>
+              <button id="hl-text-add2" class="ghost" type="button" title="再加一条字">＋ 加一条</button>
+              <button id="hl-text-tpl" class="ghost" type="button" title="把存过的文字排版套到当前片头图上（位置 / 字体 / 字号 / 颜色都跟着来，只需改文字）">📂 模板</button>
+              <button id="hl-text-save" class="ghost" type="button" title="把「片头图 + 文字」导出成 PNG 文件（之后可以反复当片头图用；导出后文字已经烧进图里，所以文字列表会清空）">💾 导出图片</button>
+              <button id="hl-text-done" class="primary" type="button" title="改完回到面板（改动是实时的，不用另外保存）">✓ 完成</button>
+              <button id="hl-text-close" class="ghost" type="button" title="关闭（Esc）">✕</button>
+            </div>
+            <div class="hl-text-body">
+              <div class="hl-text-stage">
+                <canvas id="hl-text-canvas" width="1280" height="720"></canvas>
+              </div>
+              <div class="hl-text-side">
+                <div class="hl-text-list-head">
+                  <strong>文字列表</strong>
+                  <span class="spacer"></span>
+                  <span id="hl-text-count2" class="modal-hint">0 条</span>
+                </div>
+                <div id="hl-text-list" class="hl-text-list"></div>
+                <div class="hl-text-props">
+                  <label class="hl-text-field"><span>文字</span><input id="hl-text-content" type="text" spellcheck="false" maxlength="60" /></label>
+                  <label class="hl-text-field"><span>字体</span><select id="hl-text-font"></select></label>
+                  <label class="hl-text-field">
+                    <span>字号</span>
+                    <input id="hl-text-size2" type="range" min="1" max="30" step="0.5" value="6" />
+                    <b id="hl-text-size2-val" class="head-unit">6</b>
+                  </label>
+                  <label class="hl-text-field"><span>颜色</span><input id="hl-text-color2" type="color" value="#ffffff" /></label>
+                  <div class="hl-text-props-acts">
+                    <button id="hl-text-copy" class="ghost" type="button" title="复制这条字（文字 / 字体 / 字号 / 颜色都一起复制，位置错开一点）">⧉ 复制这条</button>
+                    <button id="hl-text-del2" class="ghost" type="button">✕ 删掉这条</button>
+                    <button id="hl-text-reset2" class="ghost" type="button" title="把位置放回画面正中">⌖ 居中</button>
+                  </div>
+                  <div class="hl-text-tpl-row">
+                    <input id="hl-text-tpl-name" type="text" placeholder="模板名（如：大字标题）" spellcheck="false" maxlength="20" />
+                    <button id="hl-text-tpl-save" class="ghost" type="button" title="把当前这组文字（位置 / 字体 / 字号 / 颜色）存成模板，以后换张图也能一键套用">💾 存为模板</button>
+                  </div>
+                </div>
+                <p class="modal-hint">画面上：<b>按住字拖动</b> = 移动；<b>拖右下角的小方块</b> = 缩放字号。字号是「画面高的百分之几」，换分辨率不会变形。</p>
+              </div>
+            </div>
+          </div>
+
+          <p class="modal-hint">
+            提示：合并导出会**重新编码**整段视频（1080p 大约每分钟几秒到十几秒，取决于编码器），别拿它和正在进行的录制抢 CPU。
+          </p>
+        </div><!-- /rpane-head -->
+
+        <!-- 合成预览的全屏：只放大预览画面本身（不带面板里的设置 / 片段列表） -->
+        <div id="hp-fs" class="hp-fs-box hidden">
+          <div class="hp-fs-bar">
+            <span id="hp-fs-title">合成预览</span>
+            <button id="hp-fs-play" class="ghost" type="button" title="播放 / 暂停（空格）">▶ 播放</button>
+            <input id="hp-fs-seek" class="mo-seek" type="range" min="0" max="1000" value="0" step="1" title="拖动看整条成片" />
+            <span id="hp-fs-time" class="mo-time">0:00 / 0:00</span>
+            <button id="hp-fs-close" class="ghost" type="button" title="退出全屏（Esc）">✕ 退出全屏</button>
+          </div>
+          <div class="hp-fs-stage">
+            <canvas id="head-fs-canvas" width="1280" height="720"></canvas>
+          </div>
+        </div>
+
+        <div id="rpane-wm" class="rpane hidden">
+          <div class="edit-pane-head">
+            <h3>水印（烧进成片里）</h3>
+            <span class="spacer"></span>
+            <span id="wm-summary" class="wm-summary"></span>
+            <button id="edit-wm-reset" class="ghost" type="button" title="把下面这些参数恢复成默认值">重置</button>
+            <button id="edit-apply-wm" class="primary" type="button" disabled title="给左边「视频文件」里勾选的那些文件各烧一份水印（重编码）">给勾选的文件加水印</button>
+          </div>
+          <p class="modal-hint">参数改完立刻存进设置（下次打开还是这套）。左边勾好几个文件后点右上角按钮，每个文件各出一份带水印的成片。</p>
+          <div class="head-row">
+            <span class="head-lab">输出名</span>
+            <input id="edit-out-name" type="text" placeholder="输出文件名（留空自动生成）" spellcheck="false" />
+          </div>
+          <div class="wm-grid">
           <label class="wm-field">
             <span>类型</span>
             <select id="wm-mode">
@@ -372,8 +670,19 @@
             </span>
           </label>
         </div>
+          <p class="modal-hint" id="wm-hint"></p>
+        </div><!-- /rpane-wm -->
 
-        <p class="modal-hint" id="wm-hint"></p>
+      </section>
+
+      <section id="task-panel" class="pop-panel task-panel hidden">
+        <div class="pop-panel-head">
+          <h3>任务</h3>
+          <button id="task-clear-done" class="ghost" type="button" title="把已完成 / 失败的任务从列表里去掉（不影响文件）">清空已完成</button>
+          <button id="task-panel-close" class="ghost" type="button" title="关闭（Esc）">✕</button>
+        </div>
+        <div id="task-list" class="task-list"></div>
+        <p class="modal-hint" id="task-hint">拼接 / 片头 / 合并 / 加水印都在这里排队执行；关掉这个面板也不影响它们继续跑。</p>
       </section>
     </div>
   </main>
@@ -431,8 +740,10 @@
             <tbody>
               <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd></td><td>录制 / 停止 <b>鼠标所在的那个瓦片</b></td></tr>
               <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd></td><td>停止全部录制</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>1</kbd>…<kbd>6</kbd></td><td>录制中截精彩片段：把鼠标所在的那一路「最近 N 秒」单独存成一个 mp4（<b>30 / 20 / 15 / 10 / 5 / 3 秒</b>，不停止录制）；文件存到<b>这一场录制自己的目录</b>里（`<房间名>_<时间戳>/`，和这场录制的成片放一起）；<b>本地视频瓦片</b>同样有「⟲ 精彩」，不用录制，直接按<b>当前播放进度</b>从文件里截；瓦片顶栏的「⟲ 精彩」也有同样的菜单</td></tr>
               <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>W</kbd></td><td>整窗录制 开 / 关</td></tr>
               <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>H</kbd></td><td>显示 / 隐藏顶部工具栏</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>R</kbd> / <kbd>F5</kbd></td><td>刷新界面（重载主窗口，房间自动重新打开；正在录的那一路在独立窗口里，不受影响）</td></tr>
               <tr><td><kbd>F11</kbd></td><td>全屏观看（<kbd>Esc</kbd> 退出）</td></tr>
               <tr><td><kbd>F1</kbd> / <kbd>?</kbd></td><td>打开这张表</td></tr>
             </tbody>
@@ -443,6 +754,10 @@
           <h3>观看页</h3>
           <table class="help-table">
             <tbody>
+              <tr><td>「直播视频选项」</td><td>一个菜单管四项：只看画面（纯净模式）、弹幕面板、礼物、弹幕面板设置（行数/字号/位置）</td></tr>
+              <tr><td>「本地文件 / 摄像头」</td><td>本地音视频、摄像头都能当瓦片，和直播间混排</td></tr>
+              <tr><td>「虚拟演播室」</td><td>摄像头绿幕抠像 + 三维场景合成；画面右上角「⚙ 场景 / 抠像」开面板（场景、机位预设、抠像参数、光影匹配）</td></tr>
+              <tr><td>「虚拟人舞台」</td><td>全 CG 3D 角色 + 6 机位实时切镜头（不需要摄像头/绿幕）；画面右上角「⚙ 舞台 / 机位」开面板</td></tr>
               <tr><td>双击瓦片顶栏</td><td>单间放大 / 还原</td></tr>
               <tr><td>按住顶栏拖动</td><td>换位置（聚焦布局里：小窗排序，拖到大画面就换到中间）</td></tr>
               <tr><td><kbd>1</kbd>~<kbd>9</kbd></td><td>聚焦布局下：把第 N 号瓦片换到中间</td></tr>
@@ -462,10 +777,136 @@
           </table>
         </section>
 
+        <section class="modal-sec">
+          <h3>剪辑 · 多窗口拼接</h3>
+          <table class="help-table">
+            <tbody>
+              <tr><td>点小窗 / 左侧列表那一行</td><td>「选中」它（蓝框），后面的键都只作用于它；<kbd>↑</kbd>/<kbd>↓</kbd> 换上一个 / 下一个</td></tr>
+              <tr><td><kbd>空格</kbd></td><td>播放 / 暂停选中的那一路（没选中时 = 一起播）</td></tr>
+              <tr><td><kbd>←</kbd> / <kbd>→</kbd></td><td>进度 −1s / +1s</td></tr>
+              <tr><td><kbd>Shift</kbd>+<kbd>←</kbd>/<kbd>→</kbd></td><td>±5s（粗调）</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>←</kbd>/<kbd>→</kbd></td><td>±0.1s（细调，对帧用）</td></tr>
+              <tr><td><kbd>⛶ 全屏</kbd> / <kbd>Esc</kbd></td><td>全屏看拼接 / 退出；全屏里每个小窗顶部有自己的 ▶、进度条、标定、音量；顶部有「⏮ 回起始 / ⏭ 到结尾」（<kbd>Home</kbd>/<kbd>End</kbd>）</td></tr>
+              <tr><td>「标定」→「⌖ 分析标定」</td><td>标定齐后**每个小窗口左下角**直接显示它自己的「起始 / 结束」（分:秒），列表下面还有一张完整表格（含成片起止、谁决定结尾）</td></tr>
+              <tr><td>「📂 加本地片段」（精彩片段标题行）</td><td>把磁盘上的精彩片段文件<b>直接加进片段列表</b>（可多选，整段使用，卡片显示 `文件 · xxx.mp4（4.0s）`）；它和原片里框出来的区间片段一起排队，「生成精彩片段文件」会把它们按列表顺序拼成一个 mp4</td></tr>
+              <tr><td>「📂 选视频」/「📂 选文件」（两处入口：<b>精彩</b>那一行 + <b>原片</b>标题栏）</td><td>直接从本地磁盘挑一个视频当原片：<b>不用先放进左边的「视频文件」列表</b>，就能框精彩片段、🔍 自动找、小窗/放大细剪、生成精彩片段文件，甚至直接「合成导出」（左边没勾就合成这一个）；点 `✕ 直选` 回到"用左边勾选的样片"。mp4/m4v/mov/webm 能直接看画面，mkv/flv/ts 只能生成不能预览</td></tr>
+              <tr><td>「图片片头」页签</td><td>给勾选的视频前面插 N 秒图片（默认 2 秒）；面板里可以先<b>预览</b>（画布上就是「前 N 秒图片 + 后面原片」的效果，不生成文件），满意再导出</td></tr>
+              <tr><td>图片片头里先点一下画面</td><td><b>选中</b>那块（亮黄框）——左边「原片」或右边「合成预览」，之后的键只作用于它</td></tr>
+              <tr><td>原片进度条缩放</td><td><b>滚轮</b>放大 / 缩小（以指针位置为中心，角标 <code>×4</code> 会出现，点它或<b>双击</b>进度条回到整片）；也可以 <kbd>=</kbd> / <kbd>-</kbd> 缩放、<kbd>0</kbd> 复位。放大后 1 秒能占几十像素，起点 / 终点就好拖了</td></tr>
+              <tr><td><kbd>Space</kbd></td><td>选中窗口播放 / 暂停</td></tr>
+              <tr><td><kbd>←</kbd> / <kbd>→</kbd></td><td>选中窗口的播放位置 −1s / +1s（<kbd>Shift</kbd> 5s、<kbd>Ctrl</kbd> 0.1s）</td></tr>
+              <tr><td><kbd>[</kbd> / <kbd>]</kbd></td><td><b>播放点设为起点 / 终点</b>：选中「原片」时用原片播放位置；选中「合成预览」时把合成位置换算回原片时间（只有「正片」那一段有原片画面）。合成预览窗口标题行上也有这两个按钮</td></tr>
+              <tr><td><kbd>,</kbd><kbd>.</kbd> / <kbd>;</kbd><kbd>'</kbd></td><td>微调<b>起点</b> / <b>终点</b>：−0.1s / +0.1s（按住 <kbd>Shift</kbd> 是 1s）</td></tr>
+              <tr><td><kbd>Enter</kbd>，或「◎ 按播放点建段」</td><td><b>按播放点生成起点 + 终点</b>：以当前播放点为中心、左右各「步长」秒直接框出一段（播放中按 Enter 用的是播放器真实时间，不会差零点几秒）</td></tr>
+              <tr><td><kbd>{</kbd> / <kbd>}</kbd>，或「⟦ −Ns」「±Ns」「+Ns ⟧」</td><td><b>扩边</b>：起点往前 / 终点往后 / 两端各一步。步长用旁边的下拉框选 <b>3s / 5s / 10s</b>（默认 <b>5s</b>，记住你的选择）；碰到原片开头/结尾就停</td></tr>
+              <tr><td>「合成导出」按钮</td><td>就是那个大的主按钮（原来叫「给勾选的视频加片头」）：它把<b>图片片头 + 精彩 + 正片</b>合成成一个文件；勾了「插入到片头后面」且已生成精彩片段文件才有精彩段，勾了「只保留选区」正片就只留选区</td></tr>
+              <tr><td>勾「只保留选区」</td><td>导出时<b>正片只用选区那一段</b>（成片 = 片头 + 精彩 + 选区），不再带整条原片；右侧合成预览的总长和画面也跟着变</td></tr>
+              <tr><td><kbd>Alt</kbd>+<kbd>←</kbd>/<kbd>→</kbd></td><td>选中「合成预览」时：片头时长 −0.1s / +0.1s（<kbd>Shift</kbd> 1s）</td></tr>
+              <tr><td>全屏细剪的进度条</td><td><b>默认只铺开这一段的进度条</b>（左右各留 50% 余量），所以 1 像素只对应几毫秒，拖把手很准；<b>滚轮</b>继续放大 / 缩小，<b>双击</b>或点角标 <code>×N</code> 回到整条原片，<kbd>=</kbd>/<kbd>-</kbd>/<kbd>0</kbd> 同样可缩放</td></tr>
+              <tr><td>全屏细剪里</td><td>同一套键也能用：<kbd>Space</kbd> 播 / <kbd>←</kbd><kbd>→</kbd> 走 / <kbd>[</kbd><kbd>]</kbd> 定点 / <kbd>,</kbd><kbd>.</kbd><kbd>;</kbd><kbd>'</kbd> 微调两端</td></tr>
+              <tr><td>「⏳ 任务」</td><td>拼接 / 片头 / 合并 / 加水印的清单：进度、耗时、成片路径都在里面；切页签时顶部有角标，点一下跳回来</td></tr>
+            </tbody>
+          </table>
+        </section>
+
         <p class="modal-hint">完整说明（含录制管线、虎牙支持情况、已知限制）在项目根目录的 README.md。</p>
       </div>
     </div>
 
-    <script src="app.js">></script>
+    <!-- 关于页（和「观看 / 监控 / 剪辑 / 调试」同一级） -->
+    <main id="view-about" class="view hidden">
+      <div class="row">
+        <strong class="row-title">关于 ParallelRoom</strong>
+        <span class="hint">开发者 · 版本 · 功能一览</span>
+        <div class="spacer"></div>
+        <button id="about-refresh" class="ghost" type="button" title="重新读一遍版本 / 运行时信息（含 ffmpeg 版本）">↻ 刷新信息</button>
+      </div>
+
+      <div class="about-body">
+        <section class="about-hero">
+          <div class="about-mark">PR</div>
+          <div class="about-title">
+            <div class="about-name">ParallelRoom <span class="about-ver" id="about-ver">v—</span></div>
+            <div class="about-tagline">多直播间并行观看 · 录制 · 剪辑，一个号盯一整排房间</div>
+            <div class="about-studio">由 <b>奕霖工作室</b> 开发</div>
+          </div>
+        </section>
+
+        <p class="about-intro">
+          一个自用的 Windows 桌面工具：<b>同一个账号</b>同时进多个抖音 / 虎牙直播间，边看边把想留的片段录下来，
+          录完直接在同一个程序里对齐、剪片头、加背景音、合并导出成片 —— 不用在「浏览器 / 录屏软件 / 剪辑软件」之间倒腾文件。
+          抓的是直播流本身（不是录屏），所以画质无损、不占显卡；ffmpeg 随包，装完就能用。
+        </p>
+
+        <section class="modal-sec">
+          <h3>功能一览</h3>
+          <div class="about-feats">
+            <div class="about-feat">
+              <h4>观看</h4>
+              <ul>
+                <li>多房间同屏，共享同一登录态（隐私模式，互不串号）</li>
+                <li>布局：均分网格 / 中间大 · 右侧小窗 / 单间放大 / 全屏；瓦片可拖动换位并记住顺序</li>
+                <li>每间独立：静音、音量、画质（超清 / 高清 / 标清）、只看画面（纯净模式）</li>
+                <li>弹幕面板 / 礼物 / 页面画质徽标（页面档位 · 实际分辨率）</li>
+              </ul>
+            </div>
+            <div class="about-feat">
+              <h4>监控（谁在播）</h4>
+              <ul>
+                <li>把直播间地址丢进列表，按优先级轮转探测，避免频繁请求被验证码拦</li>
+                <li><b>★ 特别关注</b>：探测更高频，列表里也永远排在最前面</li>
+                <li>只看特别关注 / 搜索过滤 / 在播一键开成瓦片</li>
+              </ul>
+            </div>
+            <div class="about-feat">
+              <h4>录制</h4>
+              <ul>
+                <li>直接抓流分段落盘再合并成 mp4（不是录屏，画质无损）</li>
+                <li>分段时长可调、录制中可拆段、断流自动重连、异常退出后重启自动补成片</li>
+                <li>录制中一键截「最近 N 秒」精彩片段；另有整窗录制</li>
+                <li>磁盘保护：剩余空间不足自动停止</li>
+              </ul>
+            </div>
+            <div class="about-feat">
+              <h4>剪辑</h4>
+              <ul>
+                <li>多路对齐预览 → 标定 → 画中画拼接导出</li>
+                <li>图片片头（多段文字 / 字体 / 拖动排版 / 存模板 / 导出 PNG）+ 视频合并 + 背景音，一次编码出成片</li>
+                <li>逐段裁剪、参与合成、原声音量；水印 / 遮罩 / 马赛克</li>
+                <li>精彩片段管理：列表、按时间戳排序、全屏细剪</li>
+              </ul>
+            </div>
+            <div class="about-feat">
+              <h4>虚拟人 / 虚拟演播室</h4>
+              <ul>
+                <li>全 CG 3D 角色 + 6 机位实时切镜头（不需要摄像头或绿幕）</li>
+                <li>摄像头绿幕抠像 + 三维场景合成，可当直播画面源</li>
+              </ul>
+            </div>
+            <div class="about-feat">
+              <h4>兼容与体积</h4>
+              <ul>
+                <li>支持抖音（live.douyin.com）、虎牙（www.huya.com）、以及本地视频 / 摄像头当瓦片</li>
+                <li>绿色版解压即用：不写注册表、不需要管理员，数据跟着文件夹走</li>
+              </ul>
+            </div>
+          </div>
+        </section>
+
+        <section class="modal-sec">
+          <h3>运行信息</h3>
+          <p class="about-runtime" id="about-runtime">读取中…</p>
+        </section>
+
+        <p class="modal-hint">
+          免责声明：本工具仅供个人观看与本地留存使用。直播内容版权归主播与平台，请遵守平台规则与主播授权，不要用于传播或商业用途。
+        </p>
+      </div>
+    </main>
+
+    <!-- 虚拟演播室（three.js 三维场景 + 绿幕合成）：打包成普通脚本，file:// 下 type=module 会被 CORS 拦 -->
+    <script src="studio.bundle.js"></script>
+    <script src="stage.bundle.js"></script>
+    <script src="app.js"></script>
   </body>
 </html>

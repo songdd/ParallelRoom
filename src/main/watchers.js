@@ -18,13 +18,17 @@ const MAX_COOLDOWN_MS = 4 * 60 * 60 * 1000
 /**
  * 把用户输入（房间号 / 链接 / 分享文案）整理成可打开的直播地址。
  *
- * 目前认两类站点：
+ * 目前认三类站点：
  *  - 抖音：`live.douyin.com/<数字>`、`v.douyin.com` 短链（跟跳转）、纯数字房间号
  *  - 虎牙：`huya.com/<主播名 或 数字房间号>`（例如 https://www.huya.com/mingjie）
+ *  - 斗鱼：`douyu.com/<数字房间号>`（例如 https://www.douyu.com/12894332，后面的 ?dyshid=… 会丢掉）
  *
  * ⚠️ 之前这里的分支都在"没有 scheme 的候选串"上做匹配，于是：
  *   `https://v.douyin.com/xxx`  → 谁都匹配不上 → 直接"无法识别的地址"（短链解析分支根本走不到）
  * 现在先剥掉 scheme 再匹配，并且**只认直播相关的形态**。
+ *
+ * 这里只管"直播间"。任意网页（优酷视频页之类）由 parseAnyPage 处理，
+ * 只有观看页那个入口会放行（见 resolveRoomInput 的 allowPage）。
  */
 function parseRoomInput(raw) {
   const s = String(raw || '').trim()
@@ -44,6 +48,12 @@ function parseRoomInput(raw) {
     return { roomId: key, url: `https://www.huya.com/${key}`, site: 'huya' }
   }
 
+  // 2b) 斗鱼：douyu.com/<数字房间号>（`?dyshid=…` 这种跟踪参数一律丢掉）
+  const douyu = candidate.match(/(?:^|\/\/)(?:www\.|m\.)?douyu\.com\/(\d{3,})/i)
+  if (douyu) {
+    return { roomId: douyu[1], url: `https://www.douyu.com/${douyu[1]}`, site: 'douyu' }
+  }
+
   // 3) live.douyin.com/<id>（带不带 query、末尾斜杠都行）
   const live = candidate.match(/live\.douyin\.com\/(\d{5,})/i)
   if (live) return { roomId: live[1], url: `https://live.douyin.com/${live[1]}`, site: 'douyin' }
@@ -55,10 +65,43 @@ function parseRoomInput(raw) {
     return { roomId: '', url: `https://${hit}` }
   }
 
-  // 5) 兜底：文案里只带了一串数字
+  // 5) 别站网址（优酷 / B站 / YouTube…）：绝不能掉进下面的"纯数字兜底"，
+  //    否则 `youtube.com/watch?v=123456789` 会被当成抖音房间号 123456789 开一个空瓦片。
+  //    只有观看页入口会把这个串当"普通网页"再收一次（parseAnyPage）。
+  if (explicit || /^[a-z0-9-]+(\.[a-z0-9-]+)+[\/?#]/i.test(candidate)) return null
+
+  // 6) 兜底：文案里只带了一串数字
   const digits = candidate.match(/(?:^|\D)(\d{6,})(?:\D|$)/)
   if (digits) return { roomId: digits[1], url: `https://live.douyin.com/${digits[1]}`, site: 'douyin' }
   return null
+}
+
+/**
+ * 任意网页（不只是直播间）：优酷视频页、B站、YouTube…
+ *
+ * 直播瓦片和网页瓦片走的是同一套瓦片（`<webview>` + 顶栏 + 录制），区别只在录制：
+ * 抖音/虎牙有直录流，别站没有（优酷是 MSE 分片，抓不到 flv/m3u8），
+ * 所以录制会退化成"屏幕录制"，见 renderer 里 platformOf() === 'other' 那条分支。
+ *
+ * @returns {{url:string, roomId:string, site:'other'}|null}
+ */
+function parseAnyPage(raw) {
+  const s = String(raw || '').trim()
+  if (!s) return null
+  const explicit = s.match(/https?:\/\/[^\s"'<>，,、]+/i)
+  let url = explicit ? explicit[0] : ''
+  // 没写 scheme 但看着就是个网址（`v.youku.com/v_show/id_xxx.html`）也认
+  if (!url && /^[a-z0-9-]+(\.[a-z0-9-]+)+[\/?#]/i.test(s)) url = `https://${s}`
+  if (!url) return null
+  try {
+    const u = new URL(url)
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null
+    // 只认能解析出主机名的，`https://` 这种半截地址直接算失败
+    if (!u.hostname || !/[a-z0-9-]/i.test(u.hostname)) return null
+    return { url: u.toString(), roomId: '', site: 'other' }
+  } catch {
+    return null
+  }
 }
 
 /** 分享短链（v.douyin.com）需要跟一次跳转才知道真实地址 */
@@ -76,12 +119,26 @@ async function resolveShortLink(url) {
 
 /**
  * 解析 + 短链跟跳转。两个"添加"入口（观看页 / 监控页）都走这里，避免两边行为不一样。
+ *
+ * @param {string} raw
+ * @param {{allowPage?: boolean}} [opts] allowPage 只有观看页会传：
+ *   认不出直播间时，把 http(s) 网址当"普通网页瓦片"收下（优酷视频页这类）。
+ *   监控页不传 —— 探测列表里塞一个非直播页面没有意义。
  * @returns {Promise<{ok:true, url:string, roomId:string, site:string} | {ok:false, error:string}>}
  */
-async function resolveRoomInput(raw) {
+async function resolveRoomInput(raw, opts = {}) {
   const parsed = parseRoomInput(raw)
   if (!parsed) {
-    return { ok: false, error: '无法识别的地址（要抖音直播间号 / live.douyin.com 链接 / 分享短链，或 www.huya.com/<主播名>）' }
+    if (opts.allowPage) {
+      const page = parseAnyPage(raw)
+      if (page) return { ok: true, url: page.url, roomId: page.roomId, site: page.site }
+    }
+    return {
+      ok: false,
+      error: opts.allowPage
+        ? '无法识别的地址（要抖音直播间号 / live.douyin.com 链接 / 分享短链 / www.huya.com/<主播名> / www.douyu.com/<房间号>，或任意 http(s) 网页地址）'
+        : '无法识别的地址（要抖音直播间号 / live.douyin.com 链接 / 分享短链 / www.huya.com/<主播名> / www.douyu.com/<房间号>）'
+    }
   }
   let url = parsed.url
   let roomId = parsed.roomId
@@ -156,8 +213,11 @@ class WatcherStore {
   registerIpc() {
     ipcMain.handle('watchers:load', () => this.snapshot())
 
-    // 两个"添加"入口（观看页 / 监控页）共用同一个解析器：短链跟跳转、非直播链接一律拒
-    ipcMain.handle('room:resolve', async (event, raw) => resolveRoomInput(raw))
+    // 两个"添加"入口（观看页 / 监控页）共用同一个解析器：短链跟跳转、非直播链接一律拒。
+    // 差别只有一处：观看页带 allowPage，会把别站网页收成普通网页瓦片；监控页不带，仍然只认直播间。
+    ipcMain.handle('room:resolve', async (event, raw, opts) =>
+      resolveRoomInput(raw, { allowPage: !!(opts && opts.allowPage) })
+    )
 
     ipcMain.handle('watchers:add', async (event, raw) => {
       const parsed = await resolveRoomInput(raw)
@@ -567,4 +627,4 @@ class WatcherStore {
   }
 }
 
-module.exports = { WatcherStore, parseRoomInput, resolveRoomInput }
+module.exports = { WatcherStore, parseRoomInput, parseAnyPage, resolveRoomInput }

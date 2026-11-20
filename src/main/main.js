@@ -10,11 +10,102 @@
  *     进房 + 心跳，互不覆盖，因此可以“都进房间、都不退出”。
  */
 
-const { app, BrowserWindow, ipcMain, Menu, shell, session, dialog, screen, webContents, net } = require('electron')
+const { app, BrowserWindow, ipcMain, Menu, shell, session, dialog, screen, webContents, net, protocol } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
+const crypto = require('node:crypto')
+const vm = require('node:vm')
+const { execFile } = require('node:child_process')
+const { Readable } = require('node:stream')
 
 const PARTITION = 'persist:douyin'
+
+/* ---------------------- 本地音视频：自定义协议 prmedia:// ---------------------- */
+/*
+ * 为什么不直接用 file://：渲染层是 file:// 页面，播另一个 file:// 往往被当成跨源，
+ * 而且带不上 Range / 正确的 mime，拖动进度条会出问题。所以自己注册一个协议：
+ *   prmedia://local/?p=<encodeURIComponent(绝对路径)>
+ * 支持 Range（<video> 拖进度条要靠 206 响应），Content-Type 按扩展名给。
+ */
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'prmedia',
+    privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: true, corsEnabled: true }
+  }
+])
+
+/** 扩展名 → mime。Chromium 能直接播的就这些；mkv/avi/ts 这类要靠用户先转码 */
+const MEDIA_MIME = {
+  '.mp4': 'video/mp4',
+  '.m4v': 'video/mp4',
+  '.webm': 'video/webm',
+  '.mov': 'video/quicktime',
+  '.ogv': 'video/ogg',
+  '.mp3': 'audio/mpeg',
+  '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac',
+  '.wav': 'audio/wav',
+  '.flac': 'audio/flac',
+  '.ogg': 'audio/ogg',
+  '.oga': 'audio/ogg',
+  '.opus': 'audio/ogg'
+}
+
+function mediaMime(filePath) {
+  return MEDIA_MIME[path.extname(String(filePath)).toLowerCase()] || 'application/octet-stream'
+}
+
+function installLocalMediaProtocol() {
+  protocol.handle('prmedia', async (request) => {
+    try {
+      const u = new URL(request.url)
+      const filePath = decodeURIComponent(u.searchParams.get('p') || '')
+      if (!filePath) return new Response('missing path', { status: 400 })
+      let stat
+      try {
+        stat = fs.statSync(filePath)
+      } catch {
+        return new Response('not found', { status: 404 })
+      }
+      if (!stat.isFile()) return new Response('not a file', { status: 400 })
+      const total = stat.size
+      const mime = mediaMime(filePath)
+      const range = request.headers.get('range')
+      if (range) {
+        const m = /bytes=(\d*)-(\d*)/.exec(range)
+        let start = m && m[1] ? Number(m[1]) : 0
+        let end = m && m[2] ? Number(m[2]) : total - 1
+        if (!Number.isFinite(start) || start < 0) start = 0
+        if (!Number.isFinite(end) || end >= total) end = total - 1
+        if (start > end) start = Math.max(0, end)
+        const body = Readable.toWeb(fs.createReadStream(filePath, { start, end }))
+        return new Response(body, {
+          status: 206,
+          headers: {
+            'content-type': mime,
+            'content-length': String(end - start + 1),
+            'accept-ranges': 'bytes',
+            'content-range': `bytes ${start}-${end}/${total}`,
+            'cache-control': 'no-store'
+          }
+        })
+      }
+      const body = Readable.toWeb(fs.createReadStream(filePath))
+      return new Response(body, {
+        status: 200,
+        headers: {
+          'content-type': mime,
+          'content-length': String(total),
+          'accept-ranges': 'bytes',
+          'cache-control': 'no-store'
+        }
+      })
+    } catch (err) {
+      return new Response('error: ' + ((err && err.message) || String(err)), { status: 500 })
+    }
+  })
+  log('local media protocol installed')
+}
 
 /** PR_ISOLATE=1：每个房间独立 partition（cookie 复制过去），用来隔离 localStorage/IndexedDB */
 const ISOLATE = process.env.PR_ISOLATE === '1' || process.env.PR_ISOLATE === 'true'
@@ -22,7 +113,21 @@ const roomPartitions = new Set()
 
 /* ---------------------------- 调试日志（可选） ---------------------------- */
 
-const LOG_FILE = process.env.PR_LOG ? path.join(__dirname, '..', '..', '.tmp', 'main.log') : null
+// 日志落盘：沙箱（PR_DATA_DIR）放沙箱目录；安装版放 userData（asar 里是只读的，写不进去）；开发态放项目里的 .tmp
+const LOG_FILE = (() => {
+  if (!process.env.PR_LOG) return null
+  try {
+    if (process.env.PR_DATA_DIR) return path.join(process.env.PR_DATA_DIR, 'main.log')
+  } catch {}
+  try {
+    return path.join(app.getPath('userData'), 'main.log')
+  } catch {}
+  try {
+    return path.join(__dirname, '..', '..', '.tmp', 'main.log')
+  } catch {
+    return null
+  }
+})()
 
 function log(...args) {
   if (!LOG_FILE) return
@@ -49,6 +154,32 @@ if (process.env.PR_DATA_DIR) {
     log('userData ->', app.getPath('userData'))
   } catch (err) {
     log('setPath(userData) failed', err && err.message)
+  }
+}
+
+// 绿色版（zip 解压即用）：exe 同级目录有 portable.txt 就把数据放在 exe 旁边的 data\
+//  · 装到 %LOCALAPPDATA% 的安装版没有这个文件，行为不变（数据仍在 %APPDATA%\ParallelRoom）
+//  · 整个文件夹可以拷到 U 盘 / 另一台机器，登录态和房间列表跟着走
+const PORTABLE_HOME = (() => {
+  try {
+    if (process.env.PR_DATA_DIR) return ''
+    if (!app.isPackaged) return ''
+    const base = path.dirname(process.execPath)
+    if (!fs.existsSync(path.join(base, 'portable.txt'))) return ''
+    const dir = path.join(base, 'data')
+    fs.mkdirSync(dir, { recursive: true })
+    return dir
+  } catch (err) {
+    log('portable detect failed', err && err.message)
+    return ''
+  }
+})()
+if (PORTABLE_HOME) {
+  try {
+    app.setPath('userData', PORTABLE_HOME)
+    log('portable home ->', PORTABLE_HOME)
+  } catch (err) {
+    log('setPath(portable userData) failed', err && err.message)
   }
 }
 
@@ -302,6 +433,8 @@ function startCookieSync() {
  */
 const HUYA_APP_UA = 'ios/7.830 (ios 17.0; ; iPhone 15 (A2846/A3089/A3090/A3092))'
 const HUYA_APP_REFERER = 'https://servicewechat.com/wx74767bf0b684f7d3/301/page-frame.html'
+/** 网页播放器那条路（画质更高：蓝光4M）用桌面 Chrome UA */
+const HUYA_WEB_UA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${process.versions.chrome.split('.')[0]}.0.0.0 Safari/537.36`
 const HUYA_CDN_ORDER = ['TX', 'HW', 'HS', 'AL']
 
 /**
@@ -337,6 +470,85 @@ async function huyaRoomId(url, hint) {
 }
 
 /** 取虎牙的直录候选地址（已按网页客户端身份改好参数） */
+/**
+ * 从虎牙**网页播放器配置**里抠直录地址（理论上画质更高：页面会列出 蓝光30M/20M/8M/4M/超清/流畅）。
+ *
+ * ⚠️ 目前**没有启用**（`huya:streams` 只走小程序接口 `huyaStreamCandidates`）。原因（2026-11-15 实测）：
+ *   - 页面 `hyPlayerConfig.stream.data[0].gameStreamInfoList` 里那几条 FLV 地址，
+ *     在播放器环境之外用 ffmpeg 拉，**一律打不开**（同一个 wsSecret 签名，换 UA/Referer 都不行）；
+ *   - 而小程序接口给的是单一档位：三国杀那间录出来 1080p h264 ~1.14 Mbps，LOL 那间 2560×1440 ~2.5 Mbps；
+ *   - 试过给小程序接口加 `&ratio=8000 / 20000 / 0`、`&quality=…`、`&bitrate=…`：返回的
+ *     `sStreamName` / `sFlvAntiCode` **完全不变**，拿不到更高档位。
+ * 所以想要更高画质，只能走「页面里手动切蓝光 + 录窗口（屏幕录制）」这条路。
+ */
+async function huyaWebPageStreams(roomUrl, roomId) {
+  try {
+    const id = String(roomId || '').trim()
+    if (!/^\d{5,}$/.test(id)) return []
+    const res = await huyaFetch(`https://www.huya.com/${id}`, {
+      'User-Agent': HUYA_WEB_UA,
+      'accept-language': 'zh-CN,zh;q=0.9',
+      referer: 'https://www.huya.com/'
+    })
+    const html = String(res.text || '')
+    const at = html.indexOf('hyPlayerConfig')
+    if (at < 0) return []
+    const start = html.indexOf('{', at)
+    if (start < 0) return []
+    // 花括号配平，抠出那个对象字面量（页面里是 JS 不是 JSON）
+    let depth = 0
+    let end = -1
+    let inStr = false
+    let quote = ''
+    for (let i = start; i < html.length; i++) {
+      const c = html[i]
+      if (inStr) {
+        if (c === '\\') i++
+        else if (c === quote) inStr = false
+        continue
+      }
+      if (c === '"' || c === "'") {
+        inStr = true
+        quote = c
+        continue
+      }
+      if (c === '{') depth++
+      else if (c === '}') {
+        depth--
+        if (depth === 0) {
+          end = i
+          break
+        }
+      }
+    }
+    if (end < 0) return []
+    const objText = html.slice(start, end + 1)
+    let cfg = null
+    try {
+      // 页面里是对象字面量（键没引号），用 Function 当 JS 求值最省事
+      cfg = new Function('return (' + objText + ')')()
+    } catch {
+      return []
+    }
+    const list = ((((cfg || {}).stream || {}).data || [])[0] || {}).gameStreamInfoList || []
+    const quality = (((cfg || {}).stream || {}).vMultiStreamInfo || []).map((q) => q && q.sDisplayName).filter(Boolean)
+    const out = []
+    for (const it of list) {
+      const name = String(it.sStreamName || '')
+      if (!name) continue
+      const cdn = String(it.sCdnType || '')
+      if (it.sFlvUrl && it.sFlvAntiCode) {
+        out.push({ url: `${String(it.sFlvUrl).replace(/^http:/, 'https:')}/${name}.flv?${it.sFlvAntiCode}`, kind: 'flv', line: `web-${cdn}` })
+      }
+    }
+    if (out.length) log('huya web page streams', { roomId: id, quality: quality.join('/'), lines: out.map((x) => x.line).join(',') })
+    return out
+  } catch (err) {
+    log('huya web page streams failed', err && err.message)
+    return []
+  }
+}
+
 async function huyaStreamCandidates(url, roomIdHint) {
   const got = await huyaRoomId(url, roomIdHint)
   const roomId = got.roomId
@@ -389,6 +601,135 @@ async function huyaStreamCandidates(url, roomIdHint) {
   // 不在优先级表里的线路也补在后面，别漏
   for (const [cdn, it] of byCdn) if (!HUYA_CDN_ORDER.includes(cdn)) push(it, cdn)
   return { ok: true, live: true, anchor, roomId, urls }
+}
+
+/* --------------------------- 斗鱼取流（移动站接口 + Node 里算签名） --------------------------- */
+/*
+ * 为什么不能直接录页面里的 flv：斗鱼给播放器的 `wsAuth/token` 是**跟页面那次连接绑定**的，
+ * 2026-11-18 实测：token 刚发的、页面正在用 → ffmpeg 只拉到 13 帧 / 0.216 秒就 EOF；
+ * 同一个 token 再过一会儿拉 → 直接 403。
+ *
+ * 干净的路子在移动站（思路同 DouyinLiveRecorder 的 get_douyu_stream_data）：
+ *   POST https://m.douyu.com/hgapi/livenc/room/getStreamUrl
+ *   body: v=…&did=…&tt=…&sign=…&ver=22011191&rid=<房间号>&rate=0
+ *   → data.url 是一条 HLS m3u8（带 txSecret/token），**不绑页面会话**，ffmpeg 能连续拉。
+ *
+ * sign 怎么来：m 站房间页 HTML 里内联了一段混淆脚本，其中 `ub98484234(rid, did, tt)`
+ * 就返回 `v=…&did=…&tt=…&sign=…`。这段脚本是纯字符串运算（里面那个 eval 拆出来也是），
+ * 用 node 的 vm 直接跑就行 —— 所以**不需要开任何浏览器窗口**（早期版本开了个隐藏窗口，
+ * 用户反馈"点录制屏幕变大"，就是那个窗口冒出来了；而且 `webContents.debugger` 的
+ * `Network.enable` 在这个窗口上一直不返回，也走不通）。
+ * did 用一份自己生成的 32 位 id（首次生成后记在 state 里），实测服务端接受。
+ */
+const DOUYU_M_UA = 'ios/7.830 (ios 17.0; ; iPhone 15 (A2846/A3089/A3090/A3092))'
+const DOUYU_API = 'https://m.douyu.com/hgapi/livenc/room/getStreamUrl'
+/** rid -> { code, at }：从房间页抠出来的签名脚本，10 分钟换一次 */
+const douyuSnippetCache = new Map()
+/** rid -> { params, at }：算好的 v/did/tt/sign，4 分钟换一次 */
+const douyuSignCache = new Map()
+
+function douyuRid(url) {
+  const m = String(url || '').match(/douyu\.com\/(\d{3,})/)
+  return m ? m[1] : ''
+}
+
+/** 一份稳定的假 did（斗鱼只要求 did 和 sign 对得上，不需要真登录态） */
+function douyuDid() {
+  if (!state.douyuDid) {
+    const hex = crypto.randomBytes(10).toString('hex')
+    state.douyuDid = `0000000000${hex}0017p1`.slice(0, 32)
+    persist()
+    log('douyu did generated', state.douyuDid)
+  }
+  return state.douyuDid
+}
+
+/** 取（并缓存）某个房间的签名脚本片段 */
+async function douyuSnippet(rid) {
+  const hit = douyuSnippetCache.get(rid)
+  if (hit && Date.now() - hit.at < 10 * 60 * 1000) return hit.code
+  const res = await net.fetch(`https://m.douyu.com/${rid}`, { headers: { 'user-agent': DOUYU_M_UA } })
+  if (!res.ok) throw new Error(`m 站页面 HTTP ${res.status}`)
+  const html = await res.text()
+  const blocks = [...html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)].map((x) => x[1])
+  const block = blocks.find((b) => b.includes('ub98484234') && b.includes('vdwdae325w_64we'))
+  if (!block) throw new Error('m 站页面里没找到签名脚本（斗鱼改版了？）')
+  const code = block.slice(block.indexOf('vdwdae325w_64we'))
+  douyuSnippetCache.set(rid, { code, at: Date.now() })
+  log('douyu snippet cached', { rid, bytes: code.length })
+  return code
+}
+
+/** 在 vm 里跑签名脚本，拿到 v/did/tt/sign */
+async function douyuSignParams(rid) {
+  const cached = douyuSignCache.get(rid)
+  if (cached && Date.now() - cached.at < 4 * 60 * 1000) return cached.params
+  const code = await douyuSnippet(rid)
+  const ctx = {
+    CryptoJS: { MD5: (x) => ({ toString: () => crypto.createHash('md5').update(String(x), 'utf8').digest('hex') }) },
+    window: {},
+    document: {},
+    navigator: { userAgent: DOUYU_M_UA },
+    location: { href: `https://m.douyu.com/${rid}` },
+    self: {},
+    console
+  }
+  vm.createContext(ctx)
+  const fn = vm.runInContext(`${code}; ub98484234`, ctx)
+  if (typeof fn !== 'function') throw new Error('签名脚本里没有 ub98484234')
+  const tt = String(Math.floor(Date.now() / 1000))
+  const paramsStr = String(fn(rid, douyuDid(), tt))
+  const out = {}
+  for (const kv of paramsStr.split('&')) {
+    const i = kv.indexOf('=')
+    if (i > 0) out[kv.slice(0, i)] = kv.slice(i + 1)
+  }
+  if (!out.sign) throw new Error(`签名串里没有 sign：${paramsStr.slice(0, 80)}`)
+  douyuSignCache.set(rid, { params: out, at: Date.now() })
+  log('douyu sign ok', { rid, tt: out.tt, len: paramsStr.length })
+  return out
+}
+
+/** 斗鱼直录地址：rate=0 原画 + rate=3 超清，两条都试，能拿到几条算几条 */
+async function douyuStreamCandidates(url) {
+  const rid = douyuRid(url)
+  if (!rid) return { ok: false, error: '认不出斗鱼房间号（要 https://www.douyu.com/<房间号>）' }
+  let sign = null
+  try {
+    sign = await douyuSignParams(rid)
+  } catch (err) {
+    log('douyu sign failed', { rid, err: err && err.message })
+    return { ok: false, error: `拿不到斗鱼签名：${(err && err.message) || err}` }
+  }
+  const urls = []
+  let settings = []
+  const seen = new Set()
+  for (const rate of ['0', '3']) {
+    try {
+      const body = new URLSearchParams({ ...sign, rid, rate })
+      const res = await net.fetch(DOUYU_API, {
+        method: 'POST',
+        headers: { 'user-agent': DOUYU_M_UA, referer: `https://m.douyu.com/${rid}`, 'content-type': 'application/x-www-form-urlencoded' },
+        body: body.toString()
+      })
+      const j = await res.json().catch(() => null)
+      const d = (j && j.data) || {}
+      if (Array.isArray(d.settings) && d.settings.length) settings = d.settings
+      const hls = String(d.url || '')
+      if (hls && !seen.has(hls)) {
+        seen.add(hls)
+        urls.push({ url: hls, kind: 'hls-playlist', line: `douyu-rate${rate}` })
+      }
+      if (!hls) log('douyu api no url', { rid, rate, status: res.status, error: j && j.error, msg: j && j.msg })
+    } catch (err) {
+      log('douyu api failed', { rid, rate, err: err && err.message })
+    }
+  }
+  if (!urls.length) {
+    return { ok: false, live: false, roomId: rid, error: '斗鱼接口没给流地址（这个房间可能没在播）' }
+  }
+  log('douyu stream urls', { rid, n: urls.length, qualities: settings.map((s) => s.name).join(',') })
+  return { ok: true, live: true, roomId: rid, urls, settings, referer: `https://m.douyu.com/${rid}` }
 }
 
 /* --------------------------- 直播流地址嗅探 --------------------------- */
@@ -580,6 +921,15 @@ function installStreamSniffer() {
           }
         }
       }
+      // 斗鱼：桌面页播放器自己请求的取流接口（带 did/tt/sign）。截一份下来看看能不能
+      // 用它的签名换到更高画质（移动站那条只给 720p）。
+      if (process.env.PR_SNIFF && /getStreamUrl|getH5Play/i.test(url)) {
+        let body = ''
+        try {
+          for (const d of details.uploadData || []) if (d && d.bytes) body += Buffer.from(d.bytes).toString('utf8')
+        } catch {}
+        log('douyu play api seen', { url: url.slice(0, 120), method: details.method, hasBody: !!body, body: body.slice(0, 200) })
+      }
     } catch {}
     callback({})
   })
@@ -602,13 +952,16 @@ function toggleWindowFullscreen() {
  * 渲染层 window 上的 keydown 根本收不到，按键会被 guest 页面吃掉。
  * 用 before-input-event 在页面拿到之前截获，窗口和每个 guest 都要挂。
  */
-function attachFullscreenKeys(webContents, label) {
-  if (!webContents) return
+/** 「精彩片段小窗」是否开着（渲染层会同步过来；开着才拦 [ ] 两个键） */
+let clipsWinOpen = false
+
+function attachFullscreenKeys(webContents, label) {  if (!webContents) return
   webContents.on('before-input-event', (event, input) => {
     if (input.type !== 'keyDown') return
 
     // Ctrl+Shift+R：录制/停止鼠标所在瓦片；Ctrl+Shift+S：停止全部录制；
-    // Ctrl+Shift+W：整窗录制开关；Ctrl+Shift+H：显隐工具栏
+    // Ctrl+Shift+W：整窗录制开关；Ctrl+Shift+H：显隐工具栏；
+    // Ctrl+Shift+1..6：把鼠标所在瓦片「最近 N 秒」截成精彩片段（30/20/15/10/5/3）
     if (input.control && input.shift && !input.alt && !input.meta) {
       const key = String(input.key || '').toLowerCase()
       if (key === 'r' || key === 's' || key === 'w') {
@@ -617,12 +970,34 @@ function attachFullscreenKeys(webContents, label) {
         recordingHotkey(action, label)
         return
       }
+      if (/^[1-6]$/.test(key)) {
+        event.preventDefault()
+        const seconds = [30, 20, 15, 10, 5, 3][Number(key) - 1]
+        recordingHotkey('replay', label, { seconds })
+        return
+      }
       if (key === 'h') {
         event.preventDefault()
         if (win && !win.isDestroyed()) win.webContents.send('ui:toggle-bar')
         log('toggle bar hotkey', label)
         return
       }
+    }
+
+    // F8：全屏时开关「精彩片段小窗」（右侧/底部那个）
+    if (input.key === 'F8') {
+      event.preventDefault()
+      if (win && !win.isDestroyed()) win.webContents.send('ui:toggle-clipswin')
+      log('toggle clips window hotkey', label)
+      return
+    }
+
+    // 小窗开着的时候：[ = 起点、] = 终点（焦点在瓦片页面里也能用）。
+    // 只拦这两个括号键，数字 1/2 交给渲染层（页面里打字不会被打断）。
+    if (clipsWinOpen && (input.key === '[' || input.key === ']') && !input.control && !input.alt && !input.meta && !input.shift) {
+      event.preventDefault()
+      if (win && !win.isDestroyed()) win.webContents.send('ui:clips-key', input.key)
+      return
     }
 
     if (input.key === 'F11') {
@@ -638,6 +1013,24 @@ function attachFullscreenKeys(webContents, label) {
       log('open help', label)
       return
     }
+
+    // Ctrl+R / F5：刷新主窗口界面。
+    // 为什么以前按了没反应：主进程里 `Menu.setApplicationMenu(null)`，Chromium 自带的
+    // 「View → Reload」加速键随之消失，页面层又不监听 Ctrl+R —— 于是这个键等于不存在。
+    // 这里自己在 before-input-event 里接，焦点在主窗口或任意 guest 里都能用。
+    // 刷新只重载界面（房间列表来自 state.json，会自动重新打开），正在进行的录制在独立窗口里，不受影响。
+    const keyLower = String(input.key || '').toLowerCase()
+    if (
+      (input.control && !input.shift && !input.alt && !input.meta && keyLower === 'r') ||
+      (input.key === 'F5' && !input.control && !input.shift && !input.alt && !input.meta)
+    ) {
+      event.preventDefault()
+      if (win && !win.isDestroyed()) {
+        win.webContents.reload()
+        log('reload main window hotkey', label, input.key)
+      }
+      return
+    }
     if (input.key === 'Escape' && win && !win.isDestroyed() && win.isFullScreen()) {
       event.preventDefault()
       toggleWindowFullscreen()
@@ -647,7 +1040,7 @@ function attachFullscreenKeys(webContents, label) {
 }
 
 /** 录制热键：把鼠标在窗口里的位置告诉渲染层，由它决定录哪个瓦片 */
-function recordingHotkey(action, fromLabel) {
+function recordingHotkey(action, fromLabel, extra) {
   if (!win || win.isDestroyed()) return
   let point = null
   try {
@@ -657,8 +1050,8 @@ function recordingHotkey(action, fromLabel) {
   } catch (err) {
     log('hotkey cursor failed', err && err.message)
   }
-  log('recording hotkey', action, fromLabel, JSON.stringify(point))
-  win.webContents.send('rec:hotkey', { action, point })
+  log('recording hotkey', action, fromLabel, JSON.stringify(point), extra ? JSON.stringify(extra) : '')
+  win.webContents.send('rec:hotkey', { action, point, ...(extra || {}) })
 }
 
 
@@ -697,12 +1090,17 @@ const TILE_JS_TIMEOUT_MS = 4000
 const tileMeters = new Map()
 let tileSamplerTimer = null
 
-/** 从 guest 的 URL 里取房间号 */
+/** 从 guest 的 URL 里取房间号（抖音 / 虎牙 / 斗鱼 各自的形态） */
 function tileRoomId(id) {
   try {
     const g = require('electron').webContents.fromId(id)
     const u = (g && g.getURL && g.getURL()) || ''
-    return (u.match(/live\.douyin\.com\/(\d{5,})/) || [])[1] || ''
+    return (
+      (u.match(/live\.douyin\.com\/(\d{5,})/) || [])[1] ||
+      (u.match(/douyu\.com\/(\d{3,})/) || [])[1] ||
+      (u.match(/huya\.com\/([A-Za-z0-9_-]+)/) || [])[1] ||
+      ''
+    )
   } catch {
     return ''
   }
@@ -795,8 +1193,101 @@ function attachTileMeter(guest) {
   }, 12000)
 }
 
-async function sampleTileMeters() {
-  if (!tileMeters.size || !watcherStore) return
+/**
+ * 每个瓦片实际吃多少带宽 —— 数据来源就是上面 tileMeters 里 CDP `Network.dataReceived`
+ * 累加的字节数，纯本地统计，不额外发请求。
+ *
+ * 采样：调试页每 2 秒来拉一次快照，就把当前 (t, bytes) 记一笔进 entry.bw（最多留 60 秒），
+ * 于是「当前速率」= 最近 ~5 秒的平均，「平均速率」= 这个短窗整体的平均。
+ * 因为是用差分算的，页面加载突发会被算进去（第一次打开确实这么费流量），
+ * 稳态下就是「拉流码率 + 一点页面请求」。
+ */
+const BW_HIST_MS = 60 * 1000
+/**
+ * "当前速率"的窗口。不能设太短：抖音/斗鱼的播放器是「拉一大块、播一段」，
+ * 实测单块能到几十 MB，短窗口经常正好落在间隙里读成 0（历史文档里 674–3098KB/s 那种
+ * 都是长窗口平均出来的）。15 秒既跟得上变化，又不会被间隙骗。
+ */
+const BW_NOW_SPAN_MS = 15000
+
+function tileBandwidthSnapshot() {
+  const now = Date.now()
+  const rows = []
+  let totalNow = 0
+  let totalAvg = 0
+  for (const [id, entry] of tileMeters) {
+    if (!entry || entry.stopped) continue
+    if (!Array.isArray(entry.bw)) entry.bw = []
+    entry.bw.push({ t: now, bytes: entry.bytes })
+    while (entry.bw.length > 2 && now - entry.bw[0].t > BW_HIST_MS) entry.bw.shift()
+
+    // 当前速率：取 15 秒前那笔（历史不够就用最早那笔）
+    let nowRef = entry.bw[0]
+    for (const s of entry.bw) if (now - s.t >= BW_NOW_SPAN_MS) nowRef = s
+    const nowSpan = Math.max(0.35, (now - nowRef.t) / 1000)
+    const nowBps = Math.max(0, (entry.bytes - nowRef.bytes) / nowSpan)
+
+    // 峰值：相邻两次采样之间最猛的那一段（看清"突发"有多大）
+    let peakBps = 0
+    for (let i = 1; i < entry.bw.length; i++) {
+      const a = entry.bw[i - 1]
+      const b = entry.bw[i]
+      const span = Math.max(0.35, (b.t - a.t) / 1000)
+      const bps = Math.max(0, (b.bytes - a.bytes) / span)
+      if (bps > peakBps) peakBps = bps
+    }
+
+    const first = entry.bw[0]
+    const avgSpan = Math.max(0.35, (now - first.t) / 1000)
+    const avgBps = Math.max(0, (entry.bytes - first.bytes) / avgSpan)
+    entry.peakBps = peakBps
+
+    let url = ''
+    let title = ''
+    let alive = false
+    try {
+      const g = webContents.fromId(id)
+      if (g && !g.isDestroyed()) {
+        alive = true
+        url = String(g.getURL() || '')
+        title = String(g.getTitle() || '')
+      }
+    } catch {}
+
+    totalNow += nowBps
+    totalAvg += avgBps
+    rows.push({
+      webContentsId: id,
+      alive,
+      roomId: tileRoomId(id),
+      url: url.slice(0, 120),
+      title: title.slice(0, 60),
+      nowKbps: Math.round(nowBps / 1024),
+      avgKbps: Math.round(avgBps / 1024),
+      peakKbps: Math.round(peakBps / 1024),
+      nowMbps: Math.round((nowBps / 125000) * 100) / 100,
+      avgMbps: Math.round((avgBps / 125000) * 100) / 100,
+      peakMbps: Math.round((peakBps / 125000) * 100) / 100,
+      totalMb: Math.round((entry.bytes / 1048576) * 10) / 10,
+      windowSec: Math.round(avgSpan)
+    })
+  }
+  rows.sort((a, b) => b.avgKbps - a.avgKbps)
+  return {
+    at: now,
+    tickMs: TILE_SAMPLE_MS,
+    nowSpanMs: BW_NOW_SPAN_MS,
+    rows,
+    total: {
+      nowKbps: Math.round(totalNow / 1024),
+      avgKbps: Math.round(totalAvg / 1024),
+      nowMbps: Math.round((totalNow / 125000) * 100) / 100,
+      avgMbps: Math.round((totalAvg / 125000) * 100) / 100
+    }
+  }
+}
+
+async function sampleTileMeters() {  if (!tileMeters.size || !watcherStore) return
   const now = Date.now()
   /** @type {Array<{id:number, roomId:string, entry:any, avg:number, span:number}>} */
   const candidates = []
@@ -1056,10 +1547,10 @@ function createMainWindow() {
  * 站点里的 window.open 是否值得单独开窗。
  *
  * 早先的版本对所有 window.open 一律新开窗口，结果直播间里的引流广告、
- * 搜索跳转被反复弹成独立窗口。现在只放行抖音自家域名，其余一律拦掉，
- * 并对同一路径做 30 秒去重、总窗口数封顶。
+ * 搜索跳转被反复弹成独立窗口。现在只放行站点自家域名（抖音 / 虎牙 / 优酷登录），
+ * 其余一律拦掉，并对同一路径做 30 秒去重、总窗口数封顶。
  */
-const AUX_ALLOWED_HOST = /(^|\.)douyin\.com$/i
+const AUX_ALLOWED_HOST = /(^|\.)(douyin\.com|huya\.com|youku\.com|tudou\.com)$/i
 const AUX_DEDUPE_MS = 30 * 1000
 const AUX_MAX_WINDOWS = 3
 const auxRecent = new Map()
@@ -1128,27 +1619,44 @@ function openAuxWindow(url) {
 /** 登录窗口支持的目标站点（登录态都落在同一个 partition，瓦片直接复用） */
 const LOGIN_SITES = {
   douyin: { url: 'https://live.douyin.com/', title: '抖音登录（登录态对全部房间共享）' },
-  huya: { url: 'https://www.huya.com/', title: '虎牙登录（登录后可看更高画质；扫码完成后关掉这个窗口）' }
+  huya: { url: 'https://www.huya.com/', title: '虎牙登录（登录后可看更高画质；扫码完成后关掉这个窗口）' },
+  douyu: { url: 'https://www.douyu.com/', title: '斗鱼登录（扫码完成后关掉这个窗口）' }
 }
 
 function openLoginWindow(target) {
-  const site = LOGIN_SITES[target] || LOGIN_SITES.douyin
+  const known = Object.prototype.hasOwnProperty.call(LOGIN_SITES, target)
+  // ⚠️ 不认识的 target 绝不能悄悄退回抖音：以前 `LOGIN_SITES[target] || LOGIN_SITES.douyin` 的写法，
+  // 在"主进程还是旧版本、渲染层已经是新版（菜单里有斗鱼）"时会打开抖音登录窗，看着像串台。
+  // 现在直接把 ok:false 报回去，渲染层会提示"完全退出重启"。
+  if (!known) {
+    log('open login: unknown target', String(target))
+    return { ok: false, error: `这一版主进程还不认识「${target}」登录（请完全退出程序后重新打开）` }
+  }
+  const site = LOGIN_SITES[target]
   if (loginWin && !loginWin.isDestroyed()) {
     let cur = ''
     try {
       cur = String(loginWin.webContents.getURL() || '')
     } catch {}
-    const wantHuya = target === 'huya'
-    const isHuya = /huya\.com/.test(cur)
+    // 登录窗是复用的：切平台时按主机名比对，不是同一个站就换页（抖音 / 虎牙 / 斗鱼 都一样）
+    const wantHost = (() => {
+      try {
+        return new URL(site.url).hostname.replace(/^www\./i, '')
+      } catch {
+        return ''
+      }
+    })()
+    const sameSite = Boolean(wantHost) && cur.includes(wantHost)
     loginWin.show()
     loginWin.focus()
-    if (wantHuya !== isHuya) {
+    if (!sameSite) {
       try {
         loginWin.setTitle(site.title)
         loginWin.loadURL(site.url).catch(() => {})
+        log('login window switch ->', site.url, '(was', cur.slice(0, 60) + ')')
       } catch {}
     }
-    return
+    return { ok: true, platform: target, url: site.url, reused: true }
   }
   loginWin = new BrowserWindow({
     width: 1040,
@@ -1173,8 +1681,136 @@ function openLoginWindow(target) {
   })
   loginWin.on('closed', () => {
     loginWin = null
+    // 扫码登录完一般就是关掉这个窗口：通知渲染层重读一次账号状态
+    try {
+      if (win && !win.isDestroyed()) win.webContents.send('ui:login-closed')
+    } catch {}
   })
-  return
+  return { ok: true, platform: target, url: site.url, reused: false }
+}
+
+/* --------------------- 登录帐号：当前登的是谁 --------------------- */
+/*
+ * 登录态都在共享 partition（persist:douyin）里，所以只要读这一份 cookie 就知道两个平台各自登没登。
+ * 判「已登录」的 cookie：
+ *   抖音：sessionid / sessionid_ss（会话 cookie 没了就是掉登录）
+ *   虎牙：udb_uid / yyuid / huya_uid（虎牙登录后写 UDB 那一组）
+ * 昵称优先从 cookie 里拿（虎牙的 udb_nick 就是昵称，URL 编码过）；抖音 cookie 里没有昵称，
+ * 走 passport 的 account/info 接口（用这个 partition 的 session.fetch，自动带 cookie）。
+ * 任何一步失败都只是少显示一点信息，不会影响判断「登没登」。
+ */
+const LOGIN_RULES = {
+  douyin: {
+    label: '抖音',
+    probeUrl: 'https://www.douyin.com',
+    sessionCookies: ['sessionid', 'sessionid_ss', 'sid_tt'],
+    nickCookies: ['nickname', 'nick_name', 'user_name'],
+    uidCookies: ['uid_tt', 'uid_tt_ss', 'sid_tt'],
+    api: 'https://www.douyin.com/passport/web/account/info/?aid=6383&app_name=douyin_web&device_platform=web'
+  },
+  huya: {
+    label: '虎牙',
+    probeUrl: 'https://www.huya.com',
+    sessionCookies: ['udb_uid', 'yyuid', 'huya_uid', 'udb_busi'],
+    nickCookies: ['udb_nick', 'yy_nick', 'udb_nickname'],
+    uidCookies: ['udb_uid', 'yyuid', 'huya_uid'],
+    api: ''
+  },
+  douyu: {
+    label: '斗鱼',
+    probeUrl: 'https://www.douyu.com',
+    // 斗鱼登录后写 UDB 那一组（acf_*）；acf_uid / acf_auth 在就是登着的
+    sessionCookies: ['acf_uid', 'acf_auth', 'acf_stk', 'dy_auth'],
+    nickCookies: ['acf_username', 'acf_nickname', 'acf_nick', 'nickname'],
+    uidCookies: ['acf_uid', 'uid'],
+    api: ''
+  }
+}
+
+function decodeCookieText(v) {
+  if (!v) return ''
+  let out = String(v)
+  try {
+    out = decodeURIComponent(out)
+  } catch {}
+  // 有些平台把昵称再套一层 base64；只有"确实是合法 base64 且解出来是干净文本"才用，否则原样返回
+  // （踩过：纯数字 uid "7711223344" 也符合 base64 字符集，硬解就变成一堆乱码）
+  if (out.length % 4 === 0 && /^[A-Za-z0-9+/]+={0,2}$/.test(out)) {
+    const dec = Buffer.from(out, 'base64').toString('utf8')
+    const clean = dec && !dec.includes('\uFFFD') && !/[\u0000-\u0008\u000e-\u001f]/.test(dec)
+    if (clean && /[\u4e00-\u9fa5A-Za-z]/.test(dec)) out = dec
+  }
+  return out.trim()
+}
+
+/** 上次问到的昵称（抖音的昵称只能靠接口拿，缓存一份供"快速模式"直接用） */
+const loginNickCache = { douyin: '', huya: '' }
+
+async function readLoginStatus(opts = {}) {
+  const fast = Boolean(opts && opts.fast)
+  const ses = session.fromPartition(PARTITION)
+  const out = { ok: true, at: Date.now(), fast, douyin: null, huya: null }
+  for (const [platform, rule] of Object.entries(LOGIN_RULES)) {
+    const info = { platform, label: rule.label, loggedIn: false, nickname: '', uid: '', source: '', cookieNames: [] }
+    let cookies = []
+    try {
+      cookies = await ses.cookies.get({ url: rule.probeUrl })
+    } catch (err) {
+      info.error = err && err.message
+    }
+    const nameSet = new Set(cookies.map((c) => c.name))
+    info.cookieNames = [...nameSet].slice(0, 40)
+    const pick = (names) => {
+      for (const n of names) {
+        const hit = cookies.find((c) => c.name === n)
+        if (hit && hit.value) return { name: n, value: hit.value }
+      }
+      return null
+    }
+    const session = pick(rule.sessionCookies)
+    if (session) {
+      info.loggedIn = true
+      info.source = `cookie:${session.name}`
+      const nick = pick(rule.nickCookies)
+      if (nick) info.nickname = decodeCookieText(nick.value).slice(0, 40)
+      const uid = pick(rule.uidCookies)
+      if (uid) info.uid = decodeCookieText(uid.value).slice(0, 32)
+    }
+    // 抖音 cookie 里没有昵称：问一次 passport（失败就算了，不影响 loggedIn）。
+    // fast=true 时不问接口，直接用上次缓存的昵称 —— 菜单要立刻弹出来。
+    if (info.loggedIn && !info.nickname) {
+      if (loginNickCache[platform]) {
+        info.nickname = loginNickCache[platform]
+        info.source = info.source + '+cache'
+      } else if (!fast && rule.api) {
+        try {
+          const ctl = new AbortController()
+          const timer = setTimeout(() => ctl.abort(), 4000)
+          const res = await ses.fetch(rule.api, { signal: ctl.signal, headers: { 'user-agent': UA, referer: 'https://www.douyin.com/' } })
+          clearTimeout(timer)
+          if (res.ok) {
+            const json = await res.json().catch(() => null)
+            const d = json && (json.data || json)
+            const nick = d && (d.nickname || d.screen_name || d.username || d.name)
+            if (nick) {
+              info.nickname = String(nick).slice(0, 40)
+              loginNickCache[platform] = info.nickname
+              info.source = 'passport'
+            }
+            const uid = d && (d.uid || d.user_id || d.sec_uid || d.unique_id)
+            if (uid && !info.uid) info.uid = String(uid).slice(0, 32)
+          }
+        } catch (err) {
+          info.apiError = err && err.message
+        }
+      }
+    }
+    if (info.loggedIn && info.nickname) loginNickCache[platform] = info.nickname
+    if (!info.loggedIn) loginNickCache[platform] = ''
+    out[platform] = info
+  }
+  log('login status', JSON.stringify({ fast, douyin: [out.douyin.loggedIn, out.douyin.nickname, out.douyin.source], huya: [out.huya.loggedIn, out.huya.nickname, out.huya.source] }))
+  return out
 }
 
 /* -------------------------------- IPC -------------------------------- */
@@ -1200,16 +1836,99 @@ function registerIpc() {
 
   ipcMain.handle('state:save-rooms', (event, rooms) => {
     if (!Array.isArray(rooms)) return false
+    const prevCount = Array.isArray(state.rooms) ? state.rooms.length : 0
+    // 兜底：如果这次要写空列表而之前有房间，先把旧 state 备份一份，避免"被强杀时把房间列表清空"救不回来
+    if (!rooms.length && prevCount > 0) {
+      try {
+        fs.copyFileSync(statePath, statePath + '.bak-before-empty-' + Date.now())
+        log('rooms 变空：已备份旧 state', { prev: prevCount })
+      } catch (err) {
+        log('rooms 变空：备份失败', err && err.message)
+      }
+    }
     state.rooms = rooms
       .filter((r) => r && typeof r.url === 'string' && r.url.length > 0)
-      .map((r) => ({ url: r.url, muted: r.muted === true }))
+      .map((r) => {
+        const out = { url: r.url, muted: r.muted === true }
+        // 本地音视频瓦片：把文件路径也存下来，重启还能恢复
+        if (typeof r.local === 'string' && r.local) {
+          out.local = r.local
+          if (typeof r.name === 'string') out.name = r.name
+        }
+        return out
+      })
     persist()
     return true
   })
 
+  // 选本地音视频文件（可多选），返回路径 + 文件名
+  ipcMain.handle('local:pick', async (event, kind) => {
+    const presets = {
+      model: {
+        title: '选角色模型（VRoid 导出的 .vrm，或 .glb / .gltf）',
+        filters: [
+          { name: 'VRM / glTF 模型', extensions: ['vrm', 'glb', 'gltf'] },
+          { name: '所有文件', extensions: ['*'] }
+        ]
+      },
+      motion: {
+        title: '选舞蹈动作（Mixamo 下载的 .fbx，或带动画的 .glb）',
+        filters: [
+          { name: '动作文件', extensions: ['fbx', 'glb', 'gltf'] },
+          { name: '所有文件', extensions: ['*'] }
+        ]
+      },
+      video: {
+        title: '选一个视频当原片（精彩片段 / 预览用）',
+        filters: [
+          { name: '视频（浏览器能直接播）', extensions: ['mp4', 'm4v', 'mov', 'webm'] },
+          { name: '录制文件（含 mkv / flv / ts）', extensions: ['mp4', 'm4v', 'mov', 'webm', 'mkv', 'flv', 'ts', 'avi'] },
+          { name: '所有文件', extensions: ['*'] }
+        ]
+      },
+      media: {
+        title: '打开本地音视频',
+        filters: [
+          {
+            name: '音视频',
+            extensions: ['mp4', 'm4v', 'webm', 'mov', 'mp3', 'm4a', 'aac', 'wav', 'flac', 'ogg', 'oga', 'opus']
+          },
+          { name: '所有文件', extensions: ['*'] }
+        ]
+      }
+    }
+    try {
+      const preset = presets[kind] || presets.media
+      const res = await dialog.showOpenDialog(win, {
+        title: preset.title,
+        properties: ['openFile', 'multiSelections'],
+        filters: preset.filters
+      })
+      if (res.canceled || !res.filePaths || !res.filePaths.length) return { ok: false, canceled: true }
+      return {
+        ok: true,
+        files: res.filePaths.map((p) => ({ path: p, name: path.basename(p) }))
+      }
+    } catch (err) {
+      return { ok: false, error: (err && err.message) || String(err) }
+    }
+  })
+
+  // 本地文件还在不在（恢复上次打开的本地瓦片时用，报错也说得准一点）
+  ipcMain.handle('local:stat', (event, files) => {
+    if (!Array.isArray(files)) return []
+    return files.map((p) => {
+      try {
+        return fs.statSync(String(p)).isFile()
+      } catch {
+        return false
+      }
+    })
+  })
+
   ipcMain.handle('login:open', (event, target) => {
-    openLoginWindow(typeof target === 'string' ? target : 'douyin')
-    return true
+    const res = openLoginWindow(typeof target === 'string' ? target : 'douyin')
+    return res || { ok: true }
   })
 
   ipcMain.handle('session:clear', async () => {
@@ -1302,7 +2021,43 @@ function registerIpc() {
 
   ipcMain.handle('rec:start', async (event, params) => {
     if (!recorder) return { ok: false, error: '录制模块未就绪' }
-    return recorder.start(params || {})
+    const p = { ...(params || {}) }
+    /**
+     * 页面地址给了就把这一站需要的 Cookie / Origin 备好，ffmpeg 拉 m3u8 时才不会被 403
+     * （优酷、部分 HLS 站点的播放列表是"签名 + 校验 cookie"的）
+     *
+     * ⚠️ 但**抖音 / 虎牙不给 cookie**：它们的拉流地址本身带签名，cookie 没用；
+     * 而且抖音的 cookie 现在有 7.8 KB 那么长，塞进 ffmpeg 的 `-headers` 会让它直接
+     * 报 `Error opening input files: Invalid argument`（exit -22），录制整个起不来。
+     * 实测：同一地址 headers 总长 7000 字能录、7400 字就 EINVAL。
+     */
+    const hostOf = (u) => {
+      try {
+        return new URL(u).hostname
+      } catch {
+        return ''
+      }
+    }
+    const pageHost = hostOf(p.pageUrl)
+    const needsCookie = pageHost && !/(^|\.)(douyin\.com|huya\.com)$/i.test(pageHost)
+    if (p.pageUrl && !p.cookie && needsCookie) {
+      try {
+        const ses = session.fromPartition(PARTITION)
+        const list = await ses.cookies.get({ url: p.pageUrl })
+        if (Array.isArray(list) && list.length) {
+          p.cookie = list.map((c) => `${c.name}=${c.value}`).join('; ')
+          log('rec:start cookie attached', { host: pageHost, n: list.length, len: p.cookie.length })
+        }
+      } catch (err) {
+        log('rec:start cookie failed', err && err.message)
+      }
+    }
+    if (p.pageUrl) {
+      try {
+        p.origin = new URL(p.pageUrl).origin
+      } catch {}
+    }
+    return recorder.start(p)
   })
 
   ipcMain.handle('rec:stop', (event, uid) => {
@@ -1315,6 +2070,44 @@ function registerIpc() {
     return recorder.split(uid)
   })
 
+  // 边看边截：把最近 N 秒存成精彩片段（不停止录制）
+  ipcMain.handle('rec:snapshot', async (event, payload) => {
+    if (!recorder) return { ok: false, error: '录制模块未就绪' }
+    const p = payload || {}
+    return recorder.snapshotRecent(p.uid, p.seconds, { outDir: p.outDir })
+  })
+
+  // 本地视频按"当前播放进度"截一段（不录制也能用）
+  ipcMain.handle('rec:clip-file', async (event, payload) => {
+    if (!recorder) return { ok: false, error: '录制模块未就绪' }
+    return recorder.clipFromFile(payload || {})
+  })
+
+  // 全屏小窗：列这一场的精彩/精修片段
+  ipcMain.handle('rec:list-clips', (event, dir) => {
+    if (!recorder) return { ok: false, error: '录制模块未就绪', clips: [] }
+    return recorder.listClips(dir)
+  })
+
+  // 全屏小窗：最近一场"有精彩片段"的录制目录（停录/重启后也能回看）
+  ipcMain.handle('rec:last-clips-dir', () => {
+    if (!recorder) return { ok: false, error: '录制模块未就绪', clips: [] }
+    return recorder.lastClipsDir()
+  })
+
+  // 全屏小窗：按任意左右两端另存一个精修片段
+  ipcMain.handle('rec:clip-range', async (event, payload) => {
+    if (!recorder) return { ok: false, error: '录制模块未就绪' }
+    return recorder.clipRange(payload || {})
+  })
+
+  // 量时长（给「📂 加本地片段」用，支持正在写的文件 / 各种容器）
+  ipcMain.handle('rec:probe-duration', async (event, file) => {
+    if (!recorder) return { ok: false, error: '录制模块未就绪', dur: 0 }
+    const d = await recorder.probeDurationLoose(String(file || ''))
+    return { ok: Number.isFinite(d) && d > 0, dur: Number.isFinite(d) ? d : 0 }
+  })
+
   ipcMain.handle('rec:stop-all', () => {
     if (!recorder) return { ok: false, error: '录制模块未就绪' }
     return recorder.stopAll()
@@ -1323,6 +2116,11 @@ function registerIpc() {
   ipcMain.handle('rec:ping', () => {
     if (!recorder) return { ok: false, error: '录制模块未就绪' }
     return { ok: true, ffmpeg: recorder.ready, outDir: recorder.outDir, recording: recorder.actives.size > 0 }
+  })
+
+  // 渲染层同步"精彩片段小窗开没开"：开着才在主进程拦 [ ] 两个键
+  ipcMain.on('ui:clips-win-state', (event, open) => {
+    clipsWinOpen = !!open
   })
 
   ipcMain.handle('rec:mode', (event, webContentsId) => {
@@ -1346,6 +2144,26 @@ function registerIpc() {
       rec.referer = 'https://www.huya.com/'
       streamUrls.set(key, rec)
       log('huya stream urls', { roomId: res.roomId, anchor: res.anchor, lines: fresh.map((u) => u.line).join(',') })
+    }
+    return res
+  })
+
+  // 斗鱼：移动站接口取一条**不绑页面会话**的 HLS 地址（详见 douyuStreamCandidates 的注释），
+  // 同样塞进 streamUrls 让录制模块用。token 有小时级有效期，渲染层 5 分钟续一次就够。
+  ipcMain.handle('douyu:streams', async (event, url, webContentsId) => {
+    const res = await douyuStreamCandidates(url)
+    const wcId = Number(webContentsId)
+    if (res.ok && Array.isArray(res.urls) && res.urls.length && Number.isInteger(wcId) && wcId > 0) {
+      const key = String(wcId)
+      const rec = streamUrls.get(key) || { candidates: [] }
+      const now = Date.now()
+      // ⚠️ 只留我们这条 m 站 HLS：webRequest 嗅到的那个页面 flv 是"会话绑定"的，
+      // 一拉 3 秒就 EOF，还会因为优先级（flv > hls）排在前面，白录一小段再换线。
+      const fresh = res.urls.map((u) => ({ ...u, ts: now }))
+      rec.candidates = fresh.slice(0, 14)
+      rec.referer = res.referer || `https://m.douyu.com/${res.roomId}`
+      streamUrls.set(key, rec)
+      log('douyu stream urls stored', { roomId: res.roomId, lines: fresh.map((u) => u.line).join(',') })
     }
     return res
   })
@@ -1404,6 +2222,66 @@ function registerIpc() {
     if (!recorder) return { ok: false, error: '录制模块未就绪' }
     return recorder.mergeRecordings(payload || {})
   })
+  // 多窗口拼接：把几路录播拼成一张视频墙（每路可单独音量 / 延迟对齐）
+  ipcMain.handle('rec:render-mosaic', async (event, payload) => {
+    if (!recorder) return { ok: false, error: '录制模块还没就绪' }
+    // 进度回传给发起请求的那个窗口（拼接可能要几十秒，用户需要看到百分比）
+    const sender = event.sender
+    return recorder.renderMosaic({
+      ...(payload || {}),
+      onProgress: (p) => {
+        try {
+          if (!sender.isDestroyed()) sender.send('rec:mosaic-progress', p)
+        } catch {}
+      }
+    })
+  })
+
+  ipcMain.handle('rec:prepend-image', async (event, payload) => {
+    if (!recorder) return { ok: false, error: '录制模块还没就绪' }
+    const sender = event.sender
+    return recorder.prependImage({
+      ...(payload || {}),
+      onProgress: (p) => {
+        try {
+          if (!sender.isDestroyed()) sender.send('rec:mosaic-progress', p)
+        } catch {}
+      }
+    })
+  })
+
+  ipcMain.handle('rec:analyze-highlights', async (event, payload) => {
+    if (!recorder) return { ok: false, error: '录制模块还没就绪' }
+    return recorder.analyzeHighlights(payload || {})
+  })
+
+  ipcMain.handle('rec:extract-highlights', async (event, payload) => {
+    if (!recorder) return { ok: false, error: '录制模块还没就绪' }
+    const sender = event.sender
+    return recorder.extractHighlights({
+      ...(payload || {}),
+      onProgress: (p) => {
+        try {
+          if (!sender.isDestroyed()) sender.send('rec:mosaic-progress', p)
+        } catch {}
+      }
+    })
+  })
+
+  // 合并导出：片头图（N 秒）+ 各片段（含裁剪）+ 背景音，一次编码
+  ipcMain.handle('rec:merge-export', async (event, payload) => {
+    if (!recorder) return { ok: false, error: '录制模块还没就绪' }
+    const sender = event.sender
+    return recorder.mergeExport({
+      ...(payload || {}),
+      onProgress: (p) => {
+        try {
+          if (!sender.isDestroyed()) sender.send('rec:mosaic-progress', p)
+        } catch {}
+      }
+    })
+  })
+
   ipcMain.handle('rec:apply-watermark', async (event, payload) => {
     if (!recorder) return { ok: false, error: '录制模块未就绪' }
     return recorder.applyWatermark(payload || {})
@@ -1440,6 +2318,77 @@ function registerIpc() {
     if (res.canceled || !res.filePaths.length) return { ok: false }
     return { ok: true, path: res.filePaths[0] }
   })
+  // 删掉一个精彩片段文件（小窗上的「✕ 删」用）。
+  // 只允许删录制目录（或当前剪辑目录）里的普通视频文件，别的地方一律拒绝，防止误删系统文件。
+  ipcMain.handle('rec:delete-file', async (event, filePath) => {
+    const raw = String(filePath || '').trim()
+    if (!raw) return { ok: false, error: '没有文件路径' }
+    let abs
+    try {
+      abs = path.resolve(raw)
+    } catch (err) {
+      return { ok: false, error: String((err && err.message) || err) }
+    }
+    try {
+      const st = fs.statSync(abs)
+      if (!st.isFile()) return { ok: false, error: '不是文件' }
+      const roots = []
+      if (recorder && recorder.outDir) roots.push(path.resolve(recorder.outDir))
+      if (state.editDir) roots.push(path.resolve(state.editDir))
+      const inside = roots.some((root) => {
+        const rel = path.relative(root, abs)
+        return rel && !rel.startsWith('..') && !path.isAbsolute(rel)
+      })
+      if (!inside) return { ok: false, error: '只允许删除录制目录里的片段：' + abs }
+      if (!/\.(mp4|mkv|flv|m4v|mov|webm|ts)$/i.test(abs)) return { ok: false, error: '只删视频文件（.mp4 / .mkv …）' }
+      const size = st.size
+      fs.unlinkSync(abs)
+      return { ok: true, path: abs, size }
+    } catch (err) {
+      return { ok: false, error: String((err && err.message) || err) }
+    }
+  })
+
+  // 图片文字编辑后「导出图片」：把烧好字的片头图存成 PNG，之后可以反复当片头图用
+  ipcMain.handle('head:save-png', async (event, payload) => {
+    const dataUrl = String((payload && payload.dataUrl) || '')
+    const m = /^data:image\/png;base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl)
+    if (!m) return { ok: false, error: '不是 PNG 数据' }
+    let buf
+    try {
+      buf = Buffer.from(m[1], 'base64')
+    } catch (err) {
+      return { ok: false, error: 'PNG 解码失败：' + ((err && err.message) || err) }
+    }
+    const stamp = (() => {
+      const d = new Date()
+      const z = (n) => String(n).padStart(2, '0')
+      return `${d.getFullYear()}${z(d.getMonth() + 1)}${z(d.getDate())}-${z(d.getHours())}${z(d.getMinutes())}${z(d.getSeconds())}`
+    })()
+    const name = String((payload && payload.name) || '').trim() || `片头图_${stamp}.png`
+    const dir = String((payload && payload.dir) || '').trim() || (recorder && recorder.outDir) || app.getPath('pictures')
+    // 指定了明确路径就直接写（自动化 / 「覆盖上一张」都用这条），否则弹保存对话框
+    const explicit = String((payload && payload.path) || '').trim()
+    try {
+      if (explicit) {
+        const abs = path.resolve(explicit)
+        fs.mkdirSync(path.dirname(abs), { recursive: true })
+        fs.writeFileSync(abs, buf)
+        return { ok: true, path: abs, size: buf.length }
+      }
+      const res = await dialog.showSaveDialog(win, {
+        title: '导出图片（片头图 + 文字）',
+        defaultPath: path.join(dir, name),
+        filters: [{ name: 'PNG 图片', extensions: ['png'] }]
+      })
+      if (res.canceled || !res.filePath) return { ok: false, canceled: true }
+      fs.writeFileSync(res.filePath, buf)
+      return { ok: true, path: res.filePath, size: buf.length }
+    } catch (err) {
+      return { ok: false, error: (err && err.message) || String(err) }
+    }
+  })
+
   ipcMain.handle('rec:reveal', async (event, filePath) => {
     try {
       if (filePath && fs.existsSync(filePath)) shell.showItemInFolder(filePath)
@@ -1459,6 +2408,45 @@ function registerIpc() {
   ipcMain.handle('win:is-fullscreen', () => Boolean(win && !win.isDestroyed() && win.isFullScreen()))
 
   ipcMain.handle('rec:out-dir', () => (recorder ? recorder.outDir : ''))
+
+  // 登录帐号菜单用：读共享 partition 的 cookie，判断抖音 / 虎牙各自登没登、登的是谁
+  // opts.fast = 不问护照接口（只读 cookie + 上次缓存的昵称），免得菜单弹得慢
+  ipcMain.handle('login:status', (event, opts) => readLoginStatus(opts || {}))
+
+  // 关于窗口用：版本 / 运行时 / 随包 ffmpeg / 数据目录（ffmpeg -version 只跑一次，结果缓存在进程里）
+  let ffmpegVerCache = ''
+  const ffmpegVersion = (file) => {
+    if (ffmpegVerCache) return Promise.resolve(ffmpegVerCache)
+    if (!file) return Promise.resolve('')
+    return new Promise((resolve) => {
+      try {
+        execFile(file, ['-version'], { timeout: 5000, windowsHide: true }, (err, stdout) => {
+          if (err) return resolve('')
+          ffmpegVerCache = String(stdout || '').split('\n')[0].trim()
+          resolve(ffmpegVerCache)
+        })
+      } catch {
+        resolve('')
+      }
+    })
+  }
+  ipcMain.handle('app:info', async () => {
+    const ffmpegPath = (recorder && recorder.ffmpeg) || ''
+    return {
+      ok: true,
+      name: 'ParallelRoom',
+      studio: '奕霖工作室',
+      version: app.getVersion(),
+      electron: process.versions.electron,
+      chrome: process.versions.chrome,
+      node: process.versions.node,
+      packaged: app.isPackaged,
+      ffmpegPath,
+      ffmpegVersion: await ffmpegVersion(ffmpegPath),
+      dataDir: app.getPath('userData'),
+      outDir: (recorder && recorder.outDir) || ''
+    }
+  })
 
   ipcMain.handle('rec:choose-out-dir', async () => {
     if (!recorder) return { ok: false, error: '录制模块未就绪' }
@@ -1741,6 +2729,8 @@ function debugSnapshot() {
       }),
     processes,
     streams,
+    // 每个瓦片的实际下载带宽（KB/s + 累计 MB），数据来自上面 tileMeters 的字节累加
+    bandwidth: tileBandwidthSnapshot(),
     mainWebContentsId: mainId
   }
 }
@@ -2040,6 +3030,7 @@ if (!app.requestSingleInstanceLock()) {
     statePath = path.join(app.getPath('userData'), 'state.json')
     log('statePath', statePath)
     loadState()
+    installLocalMediaProtocol()
     registerIpc()
     installStreamSniffer()
 
@@ -2075,7 +3066,8 @@ if (!app.requestSingleInstanceLock()) {
       getMainWindow: () => win,
       onState: (s) => log('[rec] state', JSON.stringify(s)),
       streamUrls,
-      outDir: state.recOutDir || undefined,
+      // 绿色版：录制目录默认跟着 data\ 走（整个文件夹拷走就能接着用）；安装版/开发版仍然是「视频\ParallelRoom」或项目 output\
+      outDir: state.recOutDir || (PORTABLE_HOME ? path.join(PORTABLE_HOME, 'recordings') : undefined),
       // 分段时长 / 录完是否自动合并 / 保护参数 / 水印（上次的选择要保留）
       segmentMs: state.recSegmentMs,
       keepParts: state.recKeepParts,
@@ -2087,14 +3079,20 @@ if (!app.requestSingleInstanceLock()) {
     })
     log('recorder ready', { ffmpeg: recorder.ready, outDir: recorder.outDir })
     // 上次没保存完的录制（被强杀 / 断流）在这里补成 mp4，别让它躺在临时目录里
-    setTimeout(() => {
+    // 跑两遍：recoverOrphans 会跳过"30 秒内还在变动"的分段，紧接着重启时第一次会全部跳过，
+    // 60 秒后再扫一遍才不会漏掉（踩过：重启后 33 分钟的录制一直没被合并）。
+    const runRecover = (tag) => {
       if (!recorder) return
       Promise.resolve(recorder.recoverOrphans())
         .then((r) => {
-          if (r && (r.recovered || (r.failed && r.failed.length))) log('recoverOrphans', JSON.stringify(r))
+          if (r && (r.recovered || (r.failed && r.failed.length) || (r.skipped && r.skipped.length))) {
+            log(`recoverOrphans(${tag})`, JSON.stringify(r))
+          }
         })
         .catch((err) => log('recoverOrphans failed', err && err.message))
-    }, 3000)
+    }
+    setTimeout(() => runRecover('t+3s'), 3000)
+    setTimeout(() => runRecover('t+60s'), 60000)
 
     watcherStore.startCycle()
     startTileSampler()
