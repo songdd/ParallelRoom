@@ -6,5 +6,8 @@ dist/
 out/
 *.log
 
+# 录制成片目录（几十上百 MB 到几 GB，别提交）
+output/
+
 vendor/ffmpeg/*.exe
 
